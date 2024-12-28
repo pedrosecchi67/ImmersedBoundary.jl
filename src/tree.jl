@@ -1418,7 +1418,17 @@ function blocks(
     end
 
     if isleaf(root)
-        return (0, 0)
+        # invalid cell
+        if ((!interior_only) || root.interior) && (root.index > 0)
+            return (0, 0)
+        else
+            return (-1, -1) # terminate without registering
+        end
+    end
+
+    # no valid subcells: terminate
+    if (root.index == -2) || (interior_only && root.index == -1)
+        return (-1, -1)
     end
 
     rngs = map(

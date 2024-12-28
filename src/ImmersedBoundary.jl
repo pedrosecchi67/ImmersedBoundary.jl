@@ -95,7 +95,6 @@ module ImmersedBoundary
         centers::Tuple{Vararg{AbstractArray{Float64}}}
         spacing::Tuple{Vararg{AbstractArray{Float64}}}
         ncells::Int64
-        max_multigrid_levels::Int64
     end
 
     """
@@ -104,8 +103,7 @@ module ImmersedBoundary
     Obtain mesh from a tree.
     """
     Mesh(
-        tree::TreeCell;
-        max_multigrid_levels::Int64 = 99999,
+        tree::TreeCell
     ) = let stencils = Dict{Tuple{Vararg{Int64}}, StencilPoint}()
         lvs = leaves(tree)
 
@@ -129,7 +127,6 @@ module ImmersedBoundary
             stencils,
             centers, spacing,
             ncells,
-            max_multigrid_levels
         )
     end
 
@@ -193,8 +190,7 @@ module ImmersedBoundary
         end
 
         Mesh(
-            tree;
-            max_multigrid_levels = max(buffer_layer_depth, n_recursive_split)
+            tree
         )
 
     end
@@ -315,7 +311,6 @@ module ImmersedBoundary
 
         tree = msh.tree
         ncells = msh.ncells
-        max_multigrid_levels = msh.max_multigrid_levels
 
         stencils = Dict(
             [
@@ -326,7 +321,7 @@ module ImmersedBoundary
         Mesh(
             tree, stencils, 
             converter.(msh.centers), converter.(msh.spacing),
-            ncells, max_multigrid_levels,
+            ncells,
         )
 
     end
@@ -802,50 +797,42 @@ module ImmersedBoundary
     """
     $TYPEDFIELDS
 
-    Struct to define multigrid level interpolators.
+    Struct to define a coarse multigrid level
     """
     struct Multigrid
-        coarseners::AbstractVector{Interpolator}
-        prolongators::AbstractVector{Interpolator}
+        clusters::AbstractVector # vector of vectors
+        size_ratios::AbstractVector{Float64}
     end
 
     """
     $TYPEDSIGNATURES
 
-    Obtain a series of multigrid coarseners and prolongators.
+    Obtain a coarse multigrid level.
+
+    The coarsened tree branches should have depth `max_depth` or lower.
+    If not provided, the coarsest grid with equal-sized leaf cells is selected.
     """
-    function Multigrid(msh::Mesh, n_levels::Int64 = 5)
+    function Multigrid(msh::Mesh, max_depth::Int64 = 1000)
 
         tree = msh.tree
 
-        tree_pts = t -> let lvs = leaves(t)
-            map(l -> l.center, lvs) |> x -> reduce(hcat, x)
-        end
-        
-        coarseners = []
-        prolongators = []
+        blks = blocks(tree, max_depth)
 
-        last_tree = tree
-        last_pts = tree_pts(last_tree)
-        n = 0
-        while (!isleaf(last_tree)) && n < n_levels
-            next_tree = coarsen(last_tree)
-            next_pts = tree_pts(next_tree)
+        clusters = map(
+            blk -> map(
+                l -> l.index, leaves(blk)
+            ),
+            blks
+        )
 
-            n += 1
+        size_ratios = map(
+                        blk -> let r = blk.split_size ^ depth(blk)
+                            fill(r, r ^ ndims(tree))
+                        end,
+                        blks
+                       ) |> x -> reduce(vcat, x)
 
-            push!(coarseners, Interpolator(last_tree, next_pts))
-            push!(prolongators, Interpolator(next_tree, last_pts))
-
-            last_tree = next_tree
-            last_pts = next_pts
-        end
-
-        if length(coarseners) < n_levels
-            throw(error("Unable to provide the requested number of multigrid levels. Increase argument n_recursive_split in mesh constructor. The current max. number of levels is $(msh.max_multigrid_levels)"))
-        end
-
-        Multigrid(coarseners, prolongators)
+        Multigrid(clusters, size_ratios)
 
     end
 
@@ -857,46 +844,39 @@ module ImmersedBoundary
     See the equivalent function for meshes.
     """
     to_backend(converter, mgrid::Multigrid) = Multigrid(
-        [
-            Interpolator(
-                         converter(intp.stencils),
-                         converter(intp.weights),
-            ) for intp in mgrid.coarseners
-        ],
-        [
-            Interpolator(
-                         converter(intp.stencils),
-                         converter(intp.weights),
-            ) for intp in mgrid.prolongators
-        ],
+            map(converter, mgrid.clusters) |> converter,
+            converter(mgrid.size_ratios)
     )
 
     """
     $TYPEDSIGNATURES
 
-    Convert an array to a given grid level (coarsen and prolongate back to the original,
-    with smoothing).
+    Convert an array to a given coarse grid level 
+    (coarsen and prolongate back to the original).
     """
-    function (mgrid::Multigrid)(u::AbstractArray, level::Int64)
+    function (mgrid::Multigrid)(u::AbstractVector)
 
-        coarseners = mgrid.coarseners
-        prolongators = mgrid.prolongators
+        uc = similar(u)
 
-        if length(coarseners) < level
-            throw(error("Requested multigrid level beyond the supported number"))
-        end
+        map(
+            clst -> let m = sum(u[clst]) / length(clst)
+                uc[clst] .= m; # ret. nothing
+            end,
+            mgrid.clusters
+        )
 
-        for intp in coarseners[1:level]
-            u = intp(u)
-        end
-
-        for intp in prolongators[level:-1:1]
-            u = intp(u)
-        end
-
-        u
+        uc
 
     end
+
+    
+    """
+    $TYPEDSIGNATURES
+
+    Convert an array to a given coarse grid level 
+    (coarsen and prolongate back to the original).
+    """
+    (mgrid::Multigrid)(u::AbstractArray) = mapslices(mgrid, u; dims = ndims(u))
 
     """
     Reshape an array to match the last dimension of another
@@ -948,3 +928,4 @@ module ImmersedBoundary
     using .CFD
 
 end
+

@@ -12,6 +12,8 @@ msh = ibm.Mesh(
                 clipping_surface = stl,
 )
 
+mgrid = ibm.Multigrid(msh)
+
 wall = ibm.Boundary(msh, stl)
 freestream = ibm.Boundary(msh, (1, false), (1, true), (2, false), (2, true))
 wall_surface = ibm.Surface(msh, stl, 0.005)
@@ -117,24 +119,24 @@ impose_bcs! = q -> begin
     ibm.impose_bc!(wall_bc, wall, eachrow(q)...)
     ibm.impose_bc!(freestream_bc, freestream, eachrow(q)...)
 end
-march! = (q; CFL = 1000.0, CFL_local = 0.5, level = 0, ω = 0.8) -> begin
+march! = (q; CFL = 1000.0, CFL_local = 0.5, use_mgrid = false) -> begin
     dt = timescale(q; CFL = CFL, CFL_local = CFL_local)
     qnew = q .+ qdot(q) .* dt'
 
     impose_bcs!(qnew)
-    dq = (qnew .- q)
+    dq = (qnew .- q) ./ dt'
 
-    if level > 0
-        dq .= mgrid(dq, level) .* ((2 * ω) ^ level)
-        q .= q .+ dq
+    if use_mgrid
+        dq .= mgrid(dq)
+        q .= q .+ dq .* (mgrid.size_ratios .* dt)'
     else
         q .= qnew
     end
 
-    map(norm, eachrow(dq ./ dt'))
+    map(norm, eachrow(dq))
 end
 
-for nit = 1:20000
+for nit = 1:100
     @time begin
         resd = march!(Q)
 
