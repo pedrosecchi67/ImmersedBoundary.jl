@@ -1,7 +1,6 @@
 stl = ibm.Stereolitography("n0012.dat")
 
 L = 20.0
-nmgrid = 3
 
 msh = ibm.Mesh(
                [-L/2,-L/2], [L,L],
@@ -12,8 +11,6 @@ msh = ibm.Mesh(
                 ],
                 clipping_surface = stl,
 )
-
-mgrid = ibm.Multigrid(msh, nmgrid)
 
 wall = ibm.Boundary(msh, stl)
 freestream = ibm.Boundary(msh, (1, false), (1, true), (2, false), (2, true))
@@ -120,7 +117,7 @@ impose_bcs! = q -> begin
     ibm.impose_bc!(wall_bc, wall, eachrow(q)...)
     ibm.impose_bc!(freestream_bc, freestream, eachrow(q)...)
 end
-march! = (q; CFL = 100.0, CFL_local = 0.5, level = 0, ω = 0.8) -> begin
+march! = (q; CFL = 1000.0, CFL_local = 0.5, level = 0, ω = 0.8) -> begin
     dt = timescale(q; CFL = CFL, CFL_local = CFL_local)
     qnew = q .+ qdot(q) .* dt'
 
@@ -137,10 +134,12 @@ march! = (q; CFL = 100.0, CFL_local = 0.5, level = 0, ω = 0.8) -> begin
     map(norm, eachrow(dq ./ dt'))
 end
 
-for nit = 1:10000
-    @time resd = march!(Q)
+for nit = 1:20000
+    @time begin
+        resd = march!(Q)
 
-    @show nit, resd
+        @show nit, resd
+    end
 end
 
 dt = timescale(Q)
