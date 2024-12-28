@@ -21,13 +21,13 @@ wall_surface = ibm.Surface(msh, stl, 0.005)
 fluid = ibm.CFD.Fluid(; R = 283.0, γ = 1.4)
 
 α = 5.0
-Mach = 0.5
+M∞ = 0.5
 T∞ = 288.15
 p∞ = 1.0e5
 
 a∞ = ibm.CFD.speed_of_sound(fluid, T∞)
-u∞ = a∞ * Mach * cosd(α)
-v∞ = a∞ * Mach * sind(α)
+u∞ = a∞ * M∞ * cosd(α)
+v∞ = a∞ * M∞ * sind(α)
 
 ρ, E, ρu, ρv = ibm.CFD.primitive2state(fluid, p∞, T∞, u∞, v∞)
 ρ = fill(ρ, length(msh))
@@ -119,7 +119,7 @@ impose_bcs! = q -> begin
     ibm.impose_bc!(wall_bc, wall, eachrow(q)...)
     ibm.impose_bc!(freestream_bc, freestream, eachrow(q)...)
 end
-march! = (q; CFL = 1000.0, CFL_local = 0.5, use_mgrid = false) -> begin
+march! = (q; CFL = 0.5, CFL_local = 0.5, use_mgrid = false) -> begin
     dt = timescale(q; CFL = CFL, CFL_local = CFL_local)
     qnew = q .+ qdot(q) .* dt'
 
@@ -133,11 +133,14 @@ march! = (q; CFL = 1000.0, CFL_local = 0.5, use_mgrid = false) -> begin
         q .= qnew
     end
 
-    map(norm, eachrow(dq))
+    ibm.CFD.rms(dq)
 end
 
-for nit = 1:100
+for nit = 1:7000
     @time begin
+        if nit < 5000
+            march!(Q; use_mgrid = true)
+        end
         resd = march!(Q)
 
         @show nit, resd
@@ -150,16 +153,17 @@ dt = timescale(Q)
 p, T, u, v = ibm.CFD.state2primitive(fluid, ρ, E, ρu, ρv)
 a = ibm.CFD.speed_of_sound(fluid, T)
 
+Cp = ibm.CFD.pressure_coefficient(fluid, p, p∞, M∞)
 Mach = @. sqrt(u ^ 2 + v ^ 2) / a
 
 vtk = ibm.vtk_grid("n0012", msh;
                 p = p, T = T, u = u, v = v,
-                ρ = ρ, Mach = Mach, 
+                ρ = ρ, Mach = Mach, Cp = Cp,
                dt = dt)
 ibm.vtk_save(vtk)
 
 vtk = ibm.surf2vtk("surface", wall_surface;
                 p = p, T = T, u = u, v = v,
-                ρ = ρ, Mach = Mach)
+                ρ = ρ, Mach = Mach, Cp = Cp)
 ibm.vtk_save(vtk)
 

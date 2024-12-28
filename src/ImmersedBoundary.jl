@@ -825,12 +825,14 @@ module ImmersedBoundary
             blks
         )
 
-        size_ratios = map(
-                        blk -> let r = blk.split_size ^ depth(blk)
-                            fill(r, r ^ ndims(tree))
-                        end,
-                        blks
-                       ) |> x -> reduce(vcat, x)
+        size_ratios = zeros(length(msh))
+        for blk in blks
+            ratio = blk.split_size ^ depth(blk)
+
+            for l in leaves(blk)
+                size_ratios[l.index] = ratio
+            end
+        end
 
         Multigrid(clusters, size_ratios)
 

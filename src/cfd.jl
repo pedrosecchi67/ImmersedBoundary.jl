@@ -163,4 +163,19 @@ module CFD
 
     end
 
+    """
+    $TYPEDSIGNATURES
+
+    Obtain pressure coefficients throughout the field
+    as a function of pressure throughout the field, freestream pressure
+    and freestream Mach number.
+    """
+    function pressure_coefficient(fluid::Fluid, p, p∞::Float64, M∞::Float64)
+
+        γ = fluid.γ
+
+        Cp = @. 2 * (p / p∞ - 1.0) / (M∞ ^ 2 * γ)
+
+    end
+
 end # module CFD
