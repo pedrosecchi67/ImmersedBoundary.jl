@@ -119,7 +119,11 @@ impose_bcs! = q -> begin
     ibm.impose_bc!(wall_bc, wall, eachrow(q)...)
     ibm.impose_bc!(freestream_bc, freestream, eachrow(q)...)
 end
-march! = (q; CFL = 0.5, CFL_local = 0.5, use_mgrid = false) -> begin
+march! = (q; CFL = 100.0, CFL_local = 0.5, use_mgrid = false) -> begin
+    if use_mgrid
+        CFL = CFL_local
+    end
+
     dt = timescale(q; CFL = CFL, CFL_local = CFL_local)
     qnew = q .+ qdot(q) .* dt'
 
@@ -128,7 +132,9 @@ march! = (q; CFL = 0.5, CFL_local = 0.5, use_mgrid = false) -> begin
 
     if use_mgrid
         dq .= mgrid(dq)
-        q .= q .+ dq .* (mgrid.size_ratios .* dt)'
+        dt = mgrid(dt, minimum) .* mgrid.size_ratios
+
+        q .= q .+ dq .* dt'
     else
         q .= qnew
     end

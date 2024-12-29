@@ -850,18 +850,23 @@ module ImmersedBoundary
             converter(mgrid.size_ratios)
     )
 
+    _mean(u::AbstractVector) = sum(u) / length(u)
+
     """
     $TYPEDSIGNATURES
 
     Convert an array to a given coarse grid level 
     (coarsen and prolongate back to the original).
+
+    The reduction function is such that the value of u
+    within a cluster will be replaced by `f(u[cluster])`.
     """
-    function (mgrid::Multigrid)(u::AbstractVector)
+    function (mgrid::Multigrid)(u::AbstractVector, f = _mean)
 
         uc = similar(u)
 
         map(
-            clst -> let m = sum(u[clst]) / length(clst)
+            clst -> let m = f(u[clst])
                 uc[clst] .= m; # ret. nothing
             end,
             mgrid.clusters
@@ -877,8 +882,13 @@ module ImmersedBoundary
 
     Convert an array to a given coarse grid level 
     (coarsen and prolongate back to the original).
+
+    The reduction function is such that the value of u
+    within a cluster will be replaced by `f(u[cluster])`.
     """
-    (mgrid::Multigrid)(u::AbstractArray) = mapslices(mgrid, u; dims = ndims(u))
+    (mgrid::Multigrid)(u::AbstractArray, f = _mean) = mapslices(
+        uu -> mgrid(uu, f), u; dims = ndims(u)
+    )
 
     """
     Reshape an array to match the last dimension of another
