@@ -84,6 +84,13 @@ module ImmersedBoundary
         vv -> stencil(vv), v; dims = ndims(v)
     )
 
+    _to_backend(converter, stencil::StencilPoint) = StencilPoint(
+        Interpolator(
+             converter(stencil.interpolator.stencils),
+             converter(stencil.interpolator.weights),
+        ), converter(stencil.fetch_from)
+    )
+
     """
     $TYPEDFIELDS
 
@@ -236,7 +243,14 @@ module ImmersedBoundary
     function (msh::Mesh)(v::AbstractArray, indices::Int64...)
 
         if !haskey(msh.stencils, indices)
-            msh.stencils[indices] = StencilPoint(msh.tree, indices...)
+            st = StencilPoint(msh.tree, indices...)
+
+            bend = first(msh.centers) |> typeof |> x -> Base.typename(x).wrapper
+            if !(bend <: Array)
+                st = _to_backend(x -> bend(x), st)
+            end
+
+            msh.stencils[indices] = st
         end
 
         msh.stencils[indices](v)
@@ -280,13 +294,6 @@ module ImmersedBoundary
     LinearInterpolator(
              msh::Mesh, X::Union{AbstractMatrix{Float64}, Stereolitography}
     ) = LinearInterpolator(msh.tree, X)
-
-    _to_backend(converter, stencil::StencilPoint) = StencilPoint(
-        Interpolator(
-             converter(stencil.indices),
-             converter(stencil.weights),
-        ), converter(stencil.fetch_from)
-    )
 
     """
     $TYPEDSIGNATURES
