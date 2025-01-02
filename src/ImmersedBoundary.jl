@@ -846,7 +846,7 @@ module ImmersedBoundary
     See the equivalent function for meshes.
     """
     to_backend(converter, mgrid::Multigrid) = Multigrid(
-            map(converter, mgrid.clusters) |> converter,
+            map(converter, mgrid.clusters),
             converter(mgrid.size_ratios)
     )
 
