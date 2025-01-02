@@ -807,7 +807,8 @@ module ImmersedBoundary
     Struct to define a coarse multigrid level
     """
     struct Multigrid
-        clusters::AbstractVector # vector of vectors
+        clusters::AbstractVector{Tuple{Int64, Int64}}
+        from_cluster::AbstractVector{Int64}
         size_ratios::AbstractVector{Float64}
     end
 
@@ -826,9 +827,12 @@ module ImmersedBoundary
         blks = blocks(tree, max_depth)
 
         clusters = map(
-            blk -> map(
-                l -> l.index, leaves(blk)
-            ),
+                       blk -> let lvs = leaves(blk)
+                           (
+                                minimum(l -> l.index, lvs),
+                                maximum(l -> l.index, lvs),
+                           )
+                       end,
             blks
         )
 
@@ -841,7 +845,14 @@ module ImmersedBoundary
             end
         end
 
-        Multigrid(clusters, size_ratios)
+        from_cluster = zeros(Int64, length(msh))
+        for (k, cluster) in enumerate(clusters)
+                rng = cluster[1]:cluster[2]
+
+                from_cluster[rng] .= k
+        end
+
+        Multigrid(clusters, from_cluster, size_ratios)
 
     end
 
@@ -853,7 +864,8 @@ module ImmersedBoundary
     See the equivalent function for meshes.
     """
     to_backend(converter, mgrid::Multigrid) = Multigrid(
-            map(converter, mgrid.clusters),
+                                                        converter(mgrid.clusters),
+                                                        converter(mgrid.from_cluster),
             converter(mgrid.size_ratios)
     )
 
@@ -868,20 +880,12 @@ module ImmersedBoundary
     The reduction function is such that the value of u
     within a cluster will be replaced by `f(u[cluster])`.
     """
-    function (mgrid::Multigrid)(u::AbstractVector, f = _mean)
-
-        uc = similar(u)
-
-        map(
-            clst -> let m = f(u[clst])
-                uc[clst] .= m; # ret. nothing
-            end,
-            mgrid.clusters
-        )
-
-        uc
-
-    end
+    (mgrid::Multigrid)(u::AbstractVector, f = _mean) = map(
+        clst -> let v = view(u, clst[1]:clst[2])
+            f(v)
+        end,
+        mgrid.clusters
+    )[mgrid.from_cluster]
 
     
     """

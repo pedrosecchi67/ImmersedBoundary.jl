@@ -139,9 +139,9 @@ Q = CuArray(Q)
 
 ##################################################
 
-for nit = 1:7000
+for nit = 1:4000
     @time begin
-        if nit < 5000
+        if nit < 2000
             march!(Q; use_mgrid = true)
         end
         resd = march!(Q)

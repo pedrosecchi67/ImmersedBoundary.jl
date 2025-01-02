@@ -142,9 +142,9 @@ march! = (q; CFL = 100.0, CFL_local = 0.5, use_mgrid = false) -> begin
     ibm.CFD.rms(dq)
 end
 
-for nit = 1:7000
+for nit = 1:4000
     @time begin
-        if nit < 5000
+        if nit < 2000
             march!(Q; use_mgrid = true)
         end
         resd = march!(Q)
