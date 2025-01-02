@@ -117,7 +117,7 @@ march! = (q; CFL = 100.0, CFL_local = 0.5, use_mgrid = false) -> begin
 
     if use_mgrid
         dq .= mgrid(dq)
-        dt = mgrid(dt, minimum) .* mgrid.size_ratios
+        dt = dt .* mgrid.size_ratios
 
         q .= q .+ dq .* dt'
     else
