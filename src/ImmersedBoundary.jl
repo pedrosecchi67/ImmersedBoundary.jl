@@ -64,7 +64,7 @@ module ImmersedBoundary
 
     Obtain values at a stencil point.
     """
-    Base.getindex(v::AbstractVector, stencil::StencilPoint) = let iv = stencil.interpolator(v)
+    (stencil::StencilPoint)(v::AbstractVector) = let iv = stencil.interpolator(v)
         map(
             f -> (
                 f < 0 ?
@@ -80,8 +80,8 @@ module ImmersedBoundary
 
     Obtain values at a stencil point. The last index indicates the mesh point.
     """
-    Base.getindex(v::AbstractArray, stencil::StencilPoint) = mapslices(
-        vv -> vv[stencil], v; dims = ndims(v)
+    (stencil::StencilPoint)(v::AbstractArray) = mapslices(
+        vv -> stencil(vv), v; dims = ndims(v)
     )
 
     """
@@ -233,13 +233,13 @@ module ImmersedBoundary
     If a multi-dimensional array is passed, the last dimension
     is expected to refer to the mesh cell.
     """
-    function Base.getindex(v::AbstractArray, msh::Mesh, indices::Int64...)
+    function (msh::Mesh)(v::AbstractArray, indices::Int64...)
 
         if !haskey(msh.stencils, indices)
             msh.stencils[indices] = StencilPoint(msh.tree, indices...)
         end
 
-        v[msh.stencils[indices]]
+        msh.stencils[indices](v)
 
     end
 
@@ -257,7 +257,7 @@ module ImmersedBoundary
         inds = zeros(Int64, ndims(msh))
         inds[dim] = offset
 
-        v[msh, inds...]
+        msh(v, inds...)
 
     end
 
@@ -711,7 +711,7 @@ module ImmersedBoundary
 
     Interpolate a field property to a surface
     """
-    Base.getindex(u::AbstractArray, surf::Surface) = surf.interpolator(u)
+    (surf::Surface)(u::AbstractArray) = surf.interpolator(u)
 
     """
     $TYPEDSIGNATURES
@@ -729,7 +729,7 @@ module ImmersedBoundary
                 k => (
                     size(v, ndims(v)) == size(surf.stereolitography.points, 2) ?
                     v :
-                    v[surf]
+                    surf(v)
                ) for (k, v) in kwargs
             ]...
         )
