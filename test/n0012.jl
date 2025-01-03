@@ -6,8 +6,8 @@ msh = ibm.Mesh(
                [-L/2,-L/2], [L,L],
                stl => 0.005;
                refinement_regions = [
-                    ibm.Ball([0.0, 0.0], 0.0) => 0.001,
-                    ibm.Ball([1.0, 0.0], 0.0) => 0.001,
+                    ibm.Ball([0.0, 0.0], 0.05) => 0.001,
+                    ibm.Ball([1.0, 0.0], 0.05) => 0.001,
                 ],
                 clipping_surface = stl,
 )
@@ -142,9 +142,9 @@ march! = (q; CFL = 100.0, CFL_local = 0.5, use_mgrid = false) -> begin
     ibm.CFD.rms(dq)
 end
 
-for nit = 1:4000
+for nit = 1:5000
     @time begin
-        if nit < 2000
+        if nit < 3000
             march!(Q; use_mgrid = true)
         end
         resd = march!(Q)
