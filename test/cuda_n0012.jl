@@ -104,25 +104,36 @@ impose_bcs! = q -> begin
     ibm.impose_bc!(wall_bc, wall, eachrow(q)...)
     ibm.impose_bc!(freestream_bc, freestream, eachrow(q)...)
 end
-march! = (q; CFL = 100.0, CFL_local = 0.5, use_mgrid = false) -> begin
+march! = (q; CFL = 100.0, CFL_local = 1.0, use_mgrid = false) -> begin
     if use_mgrid
         CFL = CFL_local
     end
 
     dt = timescale(q; CFL = CFL, CFL_local = CFL_local)
-    qnew = q .+ qdot(q) .* dt'
 
-    impose_bcs!(qnew)
-    dq = (qnew .- q) ./ dt'
-
-    if use_mgrid
-        dq .= mgrid(dq)
-        dt = dt .* mgrid.size_ratios
-
-        q .= q .+ dq .* dt'
-    else
-        q .= qnew
+    # first stage of Heun's method
+    dq = let _q = qdot(q) .* dt' .+ q
+        impose_bcs!(_q)
+        _q .- q
     end
+    if use_mgrid
+        dq .= mgrid(dq) .* mgrid.size_ratios'
+    end
+    qright = q .+ dq
+
+    # second stage of Heun's method
+    dq = let _q = qdot(qright) .* dt' .+ q
+        impose_bcs!(_q)
+        _q .- q
+    end
+    if use_mgrid
+        dq .= mgrid(dq) .* mgrid.size_ratios'
+    end
+    qnew = (q .+ dq .+ qright) ./ 2
+
+    dq = qnew .- q
+
+    q .= qnew
 
     ibm.CFD.rms(dq)
 end
