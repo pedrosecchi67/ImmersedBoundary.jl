@@ -1,3 +1,5 @@
+import ImmersedBoundary as ibm
+
 stl = ibm.Stereolitography("n0012.dat")
 
 L = 20.0
@@ -63,6 +65,8 @@ timescale = (
     @. min(dtmin * CFL, dt * CFL_local)
 end
 
+choose_if(mask, iftrue, iffalse) = @. mask * iftrue + (1 - mask) * iffalse 
+
 wall_bc = ibm.BoundaryCondition() do bdry, ρ, E, ρu, ρv
     nx, ny = bdry.normals
 
@@ -88,30 +92,10 @@ freestream_bc = ibm.BoundaryCondition() do bdry, ρ, E, ρu, ρv
     is_inlet = @. M > 0.0
     subsonic = @. M < 1.0
 
-    p = map(
-        (_p, inlet, sub) -> (
-                             inlet ? (sub ? _p : p∞) : _p
-        ),
-        p, is_inlet, subsonic
-    )
-    T = map(
-        (_T, inlet) -> (
-                             inlet ? T∞ : _T
-        ),
-        T, is_inlet
-    )
-    u = map(
-        (_u, inlet) -> (
-                             inlet ? u∞ : _u
-        ),
-        u, is_inlet
-    )
-    v = map(
-        (_v, inlet) -> (
-                             inlet ? v∞ : _v
-        ),
-        v, is_inlet
-    )
+    p = choose_if(is_inlet, choose_if(subsonic, p, p∞), p)
+    T = choose_if(is_inlet, T∞, T)
+    u = choose_if(is_inlet, u∞, u)
+    v = choose_if(is_inlet, v∞, v)
 
     ibm.CFD.primitive2state(fluid, p, T, u, v)
 end
@@ -153,6 +137,22 @@ march! = (q; CFL = 100.0, CFL_local = 1.0, use_mgrid = false) -> begin
     ibm.CFD.rms(dq)
 end
 
+coeffs = q -> let _q = wall_surface(q)
+    p, _, _, _ = ibm.CFD.state2primitive(fluid, eachrow(_q)...)
+
+    Cp = ibm.CFD.pressure_coefficient(fluid, p, p∞, M∞)
+
+    nx, ny = wall_surface.normals
+
+    CX = - ibm.surface_integral(wall_surface, Cp .* nx)
+    CY = - ibm.surface_integral(wall_surface, Cp .* ny)
+
+    CD = CX * cosd(α) + CY * sind(α)
+    CL = - CX * sind(α) + CY * cosd(α)
+
+    (CL = CL, CD = CD)
+end
+
 for nit = 1:5000
     @time begin
         if nit < 3000
@@ -161,6 +161,10 @@ for nit = 1:5000
         resd = march!(Q)
 
         @show nit, resd
+    end
+
+    if nit % 100 == 0
+        @show coeffs(Q)
     end
 end
 

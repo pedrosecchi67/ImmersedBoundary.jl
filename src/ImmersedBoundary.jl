@@ -666,7 +666,7 @@ module ImmersedBoundary
     """
     function Surface(
             msh::Mesh, stl::Stereolitography, max_length::Float64 = 0.0; 
-            linear::Bool = false
+            linear::Bool = true
     )
 
         if max_length > 0.0

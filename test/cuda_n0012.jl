@@ -138,6 +138,22 @@ march! = (q; CFL = 100.0, CFL_local = 1.0, use_mgrid = false) -> begin
     ibm.CFD.rms(dq)
 end
 
+coeffs = q -> let _q = wall_surface(Array(q))
+    p, _, _, _ = ibm.CFD.state2primitive(fluid, eachrow(_q)...)
+
+    Cp = ibm.CFD.pressure_coefficient(fluid, p, p∞, M∞)
+
+    nx, ny = wall_surface.normals
+
+    CX = - ibm.surface_integral(wall_surface, Cp .* nx)
+    CY = - ibm.surface_integral(wall_surface, Cp .* ny)
+
+    CD = CX * cosd(α) + CY * sind(α)
+    CL = - CX * sind(α) + CY * cosd(α)
+
+    (CL = CL, CD = CD)
+end
+
 ##################################################
 # port everything to GPU
 
@@ -158,6 +174,10 @@ for nit = 1:5000
         resd = march!(Q)
 
         @show nit, resd
+    end
+
+    if nit % 100 == 0
+        @show coeffs(Q)
     end
 end
 
