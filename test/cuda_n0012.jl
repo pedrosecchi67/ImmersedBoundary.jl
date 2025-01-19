@@ -7,7 +7,7 @@ L = 20.0
 
 msh = ibm.Mesh(
                [-L/2,-L/2], [L,L],
-               stl => 0.005;
+               stl => 0.0025;
                refinement_regions = [
                     ibm.Ball([0.0, 0.0], 0.05) => 0.001,
                     ibm.Ball([1.0, 0.0], 0.05) => 0.001,
@@ -93,7 +93,7 @@ freestream_bc = ibm.BoundaryCondition() do bdry, ρ, E, ρu, ρv
     is_inlet = @. M > 0.0
     subsonic = @. M < 1.0
 
-    p = choose_if(is_inlet, choose_if(subsonic, p, p∞), p)
+    p = choose_if(is_inlet, choose_if(subsonic, p, p∞), choose_if(subsonic, p∞, p))
     T = choose_if(is_inlet, T∞, T)
     u = choose_if(is_inlet, u∞, u)
     v = choose_if(is_inlet, v∞, v)
