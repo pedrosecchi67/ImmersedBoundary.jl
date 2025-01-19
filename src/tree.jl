@@ -135,31 +135,30 @@ function is_neighbor(
     include_diagonal::Bool = false,
 )
 
-    cnt1 = c1.center
-    cnt2 = c2.center
+        mindist = minimum_distance(c1.center, c1.widths, c2.center, c2.widths)
 
-    w1 = c1.widths
-    w2 = c2.widths
-
-    w = (w1 .+ w2) ./ 2
-
-    dx = abs.(cnt2 .- cnt1)
-
-    all(
-        dx .< w .* 1.1
-    ) && (
-        let s = sum(
-            dx .> w .* 0.9
-        )
-            include_self || (
-                (
-                    include_diagonal ?
-                    (s > 0) :
-                    (s == 1)
-                )
-            )
+        isneigh = let m = min(minimum(c1.widths), minimum(c2.widths)) * 0.001
+            mindist < m
         end
-    )
+        if !isneigh
+            return false
+        end
+
+        if include_diagonal
+            if include_self
+                return true
+            else
+                return !(c1.center ≈ c2.center)
+            end
+        end
+
+        if all(
+                abs.(c1.center .- c2.center) .> (c1.widths .+ c2.widths) .* 0.999 ./ 2
+        )
+            return false
+        end
+
+        true
 
 end
 
@@ -580,28 +579,29 @@ function balance!(
 
     nref = 1
     while nref > 0
-        nref = 0
+        set_numbering!(root)
 
         lvs = leaves(root)
         should_split = falses(length(lvs))
         for (il, lv) in enumerate(lvs)
-            if isleaf(lv)
-                neighs = neighbors(root, lv; include_diagonal = include_diagonal,)
+            neighs = neighbors(root, lv; include_diagonal = include_diagonal,)
 
-                ws = lv.widths
+            ws = lv.widths
 
-                should_split[il] = any(
-                    n -> let nws = n.widths
-                        any(
-                            ws .> nws .* (n.split_size + 1.0e-3)
-                        )
-                    end,
-                    neighs,
+            for n in neighs
+                nws = n.widths
+                ni = n.index
+
+                should_split[il] = should_split[il] || any(
+                    ws .> nws .* (n.split_size + 1.0e-3)
                 )
-
-                nref += should_split[il]
+                should_split[ni] = should_split[ni] || any(
+                    ws .< nws ./ (n.split_size + 1.0e-3)
+                )
             end
         end
+
+        nref = sum(should_split)
 
         for (lv, ss) in zip(lvs, should_split)
             if ss
@@ -609,6 +609,8 @@ function balance!(
             end
         end
     end
+
+    set_numbering!(root)
 
 end
 
