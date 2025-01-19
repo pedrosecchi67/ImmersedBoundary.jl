@@ -53,7 +53,7 @@ module ImmersedBoundary
         fetch_from[interp_mask] .= - (1:sum(interp_mask))
         X = X[:, interp_mask]
 
-        intp = Interpolator(tree, X)
+        intp = LinearInterpolator(tree, X)
 
         StencilPoint(intp, fetch_from)
 
@@ -404,7 +404,7 @@ module ImmersedBoundary
             projections, normals
         ) |> x -> mapreduce(v -> v', vcat, x)
 
-        image_interpolator = Interpolator(msh, images)
+        image_interpolator = LinearInterpolator(msh, images)
 
         Boundary(
             ghost_indices,

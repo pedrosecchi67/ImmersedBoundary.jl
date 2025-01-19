@@ -163,6 +163,75 @@ module CFD
 
     end
 
+    #=
+    _Mplus(M::Real) = (
+        abs(M) > 1.0 ?
+        max(M, 0.0) :
+        (M + 1.0) ^ 2 / 4
+    )
+    _Mminus(M::Real) = (
+        abs(M) > 1.0 ?
+        min(0.0, M) :
+        - (M - 1.0) ^ 2 / 4
+    )
+
+    _pplus(M::Real, p::Real) = (
+        abs(M) > 1.0 ?
+        (M + abs(M)) / (2 * M) :
+        (M + 1.0) / 2
+    ) * p
+    _pminus(M::Real, p::Real) = (
+        abs(M) > 1.0 ?
+        (M - abs(M)) / (2 * M) :
+        (1.0 - M) / 2
+    ) * p
+
+    """
+    $TYPEDSIGNATURES
+
+    AUSM scheme flux evaluation. Receives state variable matrices
+    (one row per state variable) and a dimension number
+    """
+    function AUSM(Ql::AbstractMatrix, Qr::AbstractMatrix, dim::Int64, fluid::Fluid)
+
+        state_l = eachrow(Ql)
+        state_r = eachrow(Qr)
+
+        prims_l = state2primitive(fluid, state_l...)
+        prims_r = state2primitive(fluid, state_r...)
+
+        pl = prims_l[1]
+        Tl = prims_l[2]
+        vl = prims_l[dim + 2]
+        al = speed_of_sound(fluid, Tl)
+
+        pr = prims_r[1]
+        Tr = prims_r[2]
+        vr = prims_r[dim + 2]
+        ar = speed_of_sound(fluid, Tr)
+
+        ϕl = copy(Ql)
+        ϕl[2, :] .+= pl
+
+        ϕr = copy(Qr)
+        ϕr[2, :] .+= pr
+
+        Ml = vl ./ al
+        Mr = vr ./ ar
+
+        P = @. _pplus(Ml, pl) + _pminus(Mr, pr)
+        Mhalf = @. _Mplus(Ml) + _Mminus(Mr)
+
+        upwind = @. Mhalf > 0.0
+        F = @. ϕl * (al * Mhalf * upwind)' + ϕr * (ar * Mhalf * (1.0 - upwind))'
+
+        F[dim + 2, :] .+= P
+
+        F
+
+    end
+    =#
+
     """
     $TYPEDSIGNATURES
 
