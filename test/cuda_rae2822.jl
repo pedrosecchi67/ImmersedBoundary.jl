@@ -1,7 +1,7 @@
 import ImmersedBoundary as ibm
 using CUDA
 
-stl = ibm.Stereolitography("n0012.dat")
+stl = ibm.Stereolitography("rae2822.dat")
 
 L = 20.0
 
@@ -23,8 +23,8 @@ wall_surface = ibm.Surface(msh, stl, 0.005)
 
 fluid = ibm.CFD.Fluid(; R = 283.0, γ = 1.4)
 
-α = 5.0
-M∞ = 0.5
+α = 2.92
+M∞ = 0.725
 T∞ = 288.15
 p∞ = 1.0e5
 
@@ -203,13 +203,13 @@ a = ibm.CFD.speed_of_sound(fluid, T)
 Cp = ibm.CFD.pressure_coefficient(fluid, p, p∞, M∞)
 Mach = @. sqrt(u ^ 2 + v ^ 2) / a
 
-vtk = ibm.vtk_grid("n0012", msh;
+vtk = ibm.vtk_grid("rae2822", msh;
                 p = p, T = T, u = u, v = v,
                 ρ = ρ, Mach = Mach, Cp = Cp,
                dt = dt)
 ibm.vtk_save(vtk)
 
-vtk = ibm.surf2vtk("surface_n0012", wall_surface;
+vtk = ibm.surf2vtk("surface_rae2822", wall_surface;
                 p = p, T = T, u = u, v = v,
                 ρ = ρ, Mach = Mach, Cp = Cp)
 ibm.vtk_save(vtk)

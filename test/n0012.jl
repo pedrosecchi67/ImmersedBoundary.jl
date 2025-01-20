@@ -183,7 +183,7 @@ vtk = ibm.vtk_grid("n0012", msh;
                dt = dt)
 ibm.vtk_save(vtk)
 
-vtk = ibm.surf2vtk("surface", wall_surface;
+vtk = ibm.surf2vtk("surface_n0012", wall_surface;
                 p = p, T = T, u = u, v = v,
                 ρ = ρ, Mach = Mach, Cp = Cp)
 ibm.vtk_save(vtk)
