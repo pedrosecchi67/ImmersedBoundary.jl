@@ -247,4 +247,51 @@ module CFD
 
     end
 
+    """
+    $TYPEDSIGNATURES
+
+    JST-KE scheme fluxes
+    """
+    function JSTKE(
+        Qim1::AbstractMatrix{Float64},
+        Qi::AbstractMatrix{Float64},
+        Qip1::AbstractMatrix{Float64},
+        Qip2::AbstractMatrix{Float64},
+        dim::Int64, fluid::Fluid
+    )
+
+        pim1 = state2primitive(fluid, eachrow(Qim1)...)[1]
+        p, T, v = let prims = state2primitive(fluid, eachrow(Qi)...)
+            (prims[1], prims[2], prims[dim + 2])
+        end
+        pip1, Tip1, vip1 = let prims = state2primitive(fluid, eachrow(Qip1)...)
+            (prims[1], prims[2], prims[dim + 2])
+        end
+        pip2 = state2primitive(fluid, eachrow(Qip2)...)[1]
+
+        a = speed_of_sound(fluid, T)
+        aip1 = speed_of_sound(fluid, Tip1)
+
+        ϵ = sqrt(eps(eltype(p)))
+        ν = @. max(
+                abs(pip1 + pim1 - 2 * p) / (abs(pip1 - p) + abs(pim1 - p) + ϵ),
+                abs(pip2 + p - 2 * pip1) / (abs(pip1 - p) + abs(pip2 - pip1) + ϵ)
+        )
+        λ = @. max(
+                abs(v) + a, abs(vip1) + aip1
+        )
+
+        Q = @. (Qi + Qip1) / 2
+        prims = state2primitive(fluid, eachrow(Q)...)
+        p = prims[1]
+        v = prims[dim + 2]
+
+        E = Q .* v'
+        E[2, :] .+= (p .* v)
+        E[dim + 2, :] .+= p
+
+        @. E + (Qi - Qip1) * (ν * λ)' / 2
+
+    end
+
 end # module CFD

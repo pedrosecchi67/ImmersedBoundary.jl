@@ -43,8 +43,8 @@ Q = [ρ'; E'; ρu'; ρv']
 @info "$(length(msh)) cells"
 
 qdot = q -> begin
-    E = ibm.CFD.HLL(ibm.MUSCL(q, msh, 1)..., 1, fluid)
-    F = ibm.CFD.HLL(ibm.MUSCL(q, msh, 2)..., 2, fluid)
+    E = ibm.CFD.JSTKE(msh(q, -1, 0), q, msh(q, 1, 0), msh(q, 2, 0), 1, fluid)
+    F = ibm.CFD.JSTKE(msh(q, 0, -1), q, msh(q, 0, 1), msh(q, 0, 2), 2, fluid)
 
     - (ibm.∇(E, msh, 1) .+ ibm.∇(F, msh, 2))
 end
