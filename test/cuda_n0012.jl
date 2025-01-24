@@ -203,10 +203,12 @@ a = ibm.CFD.speed_of_sound(fluid, T)
 Cp = ibm.CFD.pressure_coefficient(fluid, p, p∞, M∞)
 Mach = @. sqrt(u ^ 2 + v ^ 2) / a
 
+limiter = max.(ibm.flux_limiter(Cp, msh, 1), ibm.flux_limiter(Cp, msh, 2))
+
 vtk = ibm.vtk_grid("n0012", msh;
                 p = p, T = T, u = u, v = v,
                 ρ = ρ, Mach = Mach, Cp = Cp,
-               dt = dt)
+               dt = dt, limiter = limiter)
 ibm.vtk_save(vtk)
 
 vtk = ibm.surf2vtk("surface_n0012", wall_surface;

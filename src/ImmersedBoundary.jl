@@ -761,16 +761,16 @@ module ImmersedBoundary
     """  
     Evaluate the van-Albada flux limiter.
     """
-    van_albada(∇u::Real, Δu::Real) = ∇u * Δu / (Δu ^ 2 + ∇u ^ 2 + 1e-14) * (
+    van_albada(∇u::Real, Δu::Real) = ∇u * Δu / (Δu ^ 2 + ∇u ^ 2 + 1e-14) * abs(
         sign(∇u) + sign(Δu)
-    ) * ∇u
+    )
             
     """
     Evaluate MUSCL reconstruction at the left of face `i + 1/2`, as per
     van-Albada's flux limiter
     """
     muscl_van_albada(uim1::Real, ui::Real, uip1::Real) = (
-        van_albada(ui - uim1, uip1 - ui) / 2 + ui
+          van_albada(ui - uim1, uip1 - ui) * (ui - uim1) / 2 + ui
     )
 
     """
@@ -798,6 +798,25 @@ module ImmersedBoundary
         uR = @. muscl_van_albada(uip2, uip1, ui)
 
         (uL, uR)
+
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Evaluate van-Albada flux limiter from array of properties.
+
+    Runs along mesh dimension `dim`.
+
+    Useful for debugging which points of your solution show first-order discretization.
+    """
+    function flux_limiter(u::AbstractArray, msh::Mesh, dim::Int64)
+
+        uim1 = getalong(u, msh, dim, -1)
+        ui = getalong(u, msh, dim, 0)
+        uip1 = getalong(u, msh, dim, 1)
+
+        @. van_albada(ui - uim1, uip1 - ui)
 
     end
 
