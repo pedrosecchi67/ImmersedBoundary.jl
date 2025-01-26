@@ -786,25 +786,25 @@ module ImmersedBoundary
     end
 
     """  
-    Evaluate the van-Albada flux limiter.
+    Evaluate the minmod flux limiter.
     """
-    van_albada(∇u::Real, Δu::Real) = ∇u * Δu / (Δu ^ 2 + ∇u ^ 2 + 1e-14) * abs(
+    minmod(∇u::Real, Δu::Real) = min(abs(∇u), abs(Δu)) * abs(
         sign(∇u) + sign(Δu)
-    )
+    ) / 2 / (abs(∇u) + 1e-10)
             
     """
     Evaluate MUSCL reconstruction at the left of face `i + 1/2`, as per
-    van-Albada's flux limiter
+    minmod flux limiter
     """
-    muscl_van_albada(uim1::Real, ui::Real, uip1::Real) = (
-          van_albada(ui - uim1, uip1 - ui) * (ui - uim1) / 2 + ui
+    muscl_minmod(uim1::Real, ui::Real, uip1::Real) = (
+          minmod(ui - uim1, uip1 - ui) * (ui - uim1) / 2 + ui
     )
 
     """
     $TYPEDSIGNATURES
 
     Evaluate MUSCL reconstruction at the left and right of face `i + 1/2`, as per
-    van-Albada's flux limiter.
+    minmod flux limiter.
 
     Runs along mesh dimension `dim`.
 
@@ -821,8 +821,8 @@ module ImmersedBoundary
         uip1 = getalong(u, msh, dim, 1)
         uip2 = getalong(u, msh, dim, 2)
 
-        uL = @. muscl_van_albada(uim1, ui, uip1)
-        uR = @. muscl_van_albada(uip2, uip1, ui)
+        uL = @. muscl_minmod(uim1, ui, uip1)
+        uR = @. muscl_minmod(uip2, uip1, ui)
 
         (uL, uR)
 
@@ -843,7 +843,7 @@ module ImmersedBoundary
         ui = getalong(u, msh, dim, 0)
         uip1 = getalong(u, msh, dim, 1)
 
-        @. van_albada(ui - uim1, uip1 - ui)
+        @. minmod(ui - uim1, uip1 - ui)
 
     end
 
