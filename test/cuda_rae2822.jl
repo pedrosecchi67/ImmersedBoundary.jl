@@ -166,6 +166,8 @@ Q = CuArray(Q)
 
 ##################################################
 
+impose_bcs!(Q)
+
 for nit = 1:5000
     @time begin
         if nit < 3000

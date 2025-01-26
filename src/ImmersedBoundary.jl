@@ -101,6 +101,7 @@ module ImmersedBoundary
         stencils::Dict{Tuple{Vararg{Int64}}, StencilPoint}
         centers::Tuple{Vararg{AbstractArray{Float64}}}
         spacing::Tuple{Vararg{AbstractArray{Float64}}}
+        interior_point::Vector{Float64}
         ncells::Int64
     end
 
@@ -110,10 +111,15 @@ module ImmersedBoundary
     Obtain mesh from a tree.
     """
     Mesh(
-        tree::TreeCell
+        tree::TreeCell;
+        interior_point = nothing
     ) = let stencils = Dict{Tuple{Vararg{Int64}}, StencilPoint}()
         lvs = leaves(tree)
 
+        if isnothing(interior_point)
+            interior_point = tree.origin .- 0.1 .* tree.widths
+        end
+        
         centers = map(
             i -> map(
                 l -> l.center[i], lvs
@@ -133,6 +139,7 @@ module ImmersedBoundary
             tree,
             stencils,
             centers, spacing,
+            interior_point,
             ncells,
         )
     end
@@ -170,6 +177,7 @@ module ImmersedBoundary
         interior_point = nothing,
         buffer_layer_depth::Int64 = 3,
         intersection_detection_ratio::Float64 = 1.1,
+        cutting_ratio::Float64 = - 1.1,
         split_size::Int64 = 2,
         n_recursive_split::Int64 = 5,
     )
@@ -192,12 +200,13 @@ module ImmersedBoundary
             clip_interior!(
                 tree,
                 clipping_surface;
-                interior = interior_point
+                interior = interior_point,
+                ratio = cutting_ratio,
             )
         end
 
         Mesh(
-            tree
+            tree; interior_point = interior_point,
         )
 
     end
@@ -327,7 +336,7 @@ module ImmersedBoundary
 
         Mesh(
             tree, stencils, 
-            converter.(msh.centers), converter.(msh.spacing),
+            converter.(msh.centers), converter.(msh.spacing), msh.interior_point,
             ncells,
         )
 
@@ -368,21 +377,29 @@ module ImmersedBoundary
 
     `ratio` defines that any cell separated from a boundary by no more than
     `ratio * norm(cell.widths) * sqrt(ndims(msh))` will be flagged as a ghost point.
+
+    `isin` may be a vector of booleans with `true` for in-domain cells.
     """
     function Boundary(
-        msh::Mesh, projections::AbstractMatrix{Float64};
-        ratio::Real = 1.1,
+        msh::Mesh, projections::AbstractMatrix{Float64}, isin = nothing;
+        ratio::Real = 0.0,
     )
+
+        if isnothing(isin)
+            isin = trues(size(projections, 2))
+        end
 
         ϵ = sqrt(eps(eltype(projections)))
 
         projections = eachrow(projections) |> Tuple
 
         distance_field = map((c, p) -> (c .- p) .^ 2, msh.centers, projections) |> sum |> x -> sqrt.(x)
+        @. distance_field *= (2 * isin - 1)
+
         characteristic_lengths = map(w -> w .^ 2, msh.spacing) |> sum |> x -> sqrt.(x)
     
         normals = map(
-            (c, p) -> (@. (c - p) / (distance_field + ϵ)),
+            (c, p) -> (@. (c - p) / (distance_field + ϵ * sign(distance_field))),
             msh.centers, projections,
         )
 
@@ -397,7 +414,12 @@ module ImmersedBoundary
         centers = select.(msh.centers)
         projections = select.(projections)
 
-        image_distances = distances .+ select(characteristic_lengths) .* (sqrt(nd) * ratio)
+        image_distances = let cl = select(characteristic_lengths)
+            @. max(
+                   distances + cl * (sqrt(nd) * ratio),
+                   cl * sqrt(nd)
+            )
+        end
 
         images = map(
             (p, n) -> p .+ n .* image_distances,
@@ -426,18 +448,23 @@ module ImmersedBoundary
     """
     function Boundary(
         msh::Mesh, stls::Stereolitography...;
-        ratio::Real = 1.1,
+        ratio::Real = 0.0,
     )
 
         stl_joint = cat(stls...)
         stltree = STLTree(stl_joint)
 
+        lvs = leaves(msh.tree)
         projs = map(
             l -> stltree(l.center)[1],
-            leaves(msh.tree)
+            lvs
         ) |> x -> reduce(hcat, x)
+        isin = map(
+            l -> !point_in_polygon(stltree, l.center; outside_reference = msh.interior_point),
+            lvs
+        )
 
-        Boundary(msh, projs; ratio = ratio)
+        Boundary(msh, projs, isin; ratio = ratio)
 
     end
 
