@@ -101,6 +101,7 @@ module ImmersedBoundary
         stencils::Dict{Tuple{Vararg{Int64}}, StencilPoint}
         centers::Tuple{Vararg{AbstractArray{Float64}}}
         spacing::Tuple{Vararg{AbstractArray{Float64}}}
+        interior_point::Vector{Float64}
         ncells::Int64
     end
 
@@ -110,10 +111,15 @@ module ImmersedBoundary
     Obtain mesh from a tree.
     """
     Mesh(
-        tree::TreeCell
+        tree::TreeCell;
+        interior_point = nothing
     ) = let stencils = Dict{Tuple{Vararg{Int64}}, StencilPoint}()
         lvs = leaves(tree)
 
+        if isnothing(interior_point)
+            interior_point = tree.origin .- 0.1 .* tree.widths
+        end
+        
         centers = map(
             i -> map(
                 l -> l.center[i], lvs
@@ -133,6 +139,7 @@ module ImmersedBoundary
             tree,
             stencils,
             centers, spacing,
+            interior_point,
             ncells,
         )
     end
@@ -199,7 +206,7 @@ module ImmersedBoundary
         end
 
         Mesh(
-            tree
+            tree; interior_point = interior_point,
         )
 
     end
@@ -329,7 +336,7 @@ module ImmersedBoundary
 
         Mesh(
             tree, stencils, 
-            converter.(msh.centers), converter.(msh.spacing),
+            converter.(msh.centers), converter.(msh.spacing), msh.interior_point,
             ncells,
         )
 
@@ -392,7 +399,7 @@ module ImmersedBoundary
         characteristic_lengths = map(w -> w .^ 2, msh.spacing) |> sum |> x -> sqrt.(x)
     
         normals = map(
-            (c, p) -> (@. (c - p) / (distance_field + ϵ)),
+            (c, p) -> (@. (c - p) / (distance_field + ϵ * sign(distance_field))),
             msh.centers, projections,
         )
 
@@ -407,7 +414,7 @@ module ImmersedBoundary
         centers = select.(msh.centers)
         projections = select.(projections)
 
-        image_distances = distances .+ select(characteristic_lengths) .* (sqrt(nd) * ratio)
+        image_distances = abs.(distances) .+ select(characteristic_lengths) .* (sqrt(nd) * ratio)
 
         images = map(
             (p, n) -> p .+ n .* image_distances,
@@ -442,12 +449,17 @@ module ImmersedBoundary
         stl_joint = cat(stls...)
         stltree = STLTree(stl_joint)
 
+        lvs = leaves(msh.tree)
         projs = map(
             l -> stltree(l.center)[1],
-            leaves(msh.tree)
+            lvs
         ) |> x -> reduce(hcat, x)
+        isin = map(
+            l -> !point_in_polygon(stltree, l.center; outside_reference = msh.interior_point),
+            lvs
+        )
 
-        Boundary(msh, projs; ratio = ratio)
+        Boundary(msh, projs, isin; ratio = ratio)
 
     end
 

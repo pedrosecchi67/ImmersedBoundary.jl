@@ -166,7 +166,7 @@ Q = CuArray(Q)
 
 ##################################################
 
-for nit = 1:1
+for nit = 1:100
     @time begin
         if nit < 0
             march!(Q; use_mgrid = true)
