@@ -166,9 +166,11 @@ Q = CuArray(Q)
 
 ##################################################
 
-for nit = 1:100
+impose_bcs!(Q)
+
+for nit = 1:5000
     @time begin
-        if nit < 0
+        if nit < 3000
             march!(Q; use_mgrid = true)
         end
         resd = march!(Q)

@@ -414,7 +414,12 @@ module ImmersedBoundary
         centers = select.(msh.centers)
         projections = select.(projections)
 
-        image_distances = abs.(distances) .+ select(characteristic_lengths) .* (sqrt(nd) * ratio)
+        image_distances = let cl = select(characteristic_lengths)
+            @. max(
+                   distances + cl * (sqrt(nd) * ratio),
+                   cl * sqrt(nd)
+            )
+        end
 
         images = map(
             (p, n) -> p .+ n .* image_distances,
@@ -443,7 +448,7 @@ module ImmersedBoundary
     """
     function Boundary(
         msh::Mesh, stls::Stereolitography...;
-        ratio::Real = 1.1,
+        ratio::Real = 0.0,
     )
 
         stl_joint = cat(stls...)
