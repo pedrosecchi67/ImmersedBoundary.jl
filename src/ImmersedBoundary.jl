@@ -170,6 +170,7 @@ module ImmersedBoundary
         interior_point = nothing,
         buffer_layer_depth::Int64 = 3,
         intersection_detection_ratio::Float64 = 1.1,
+        cutting_ratio::Float64 = - 1.1,
         split_size::Int64 = 2,
         n_recursive_split::Int64 = 5,
     )
@@ -192,7 +193,8 @@ module ImmersedBoundary
             clip_interior!(
                 tree,
                 clipping_surface;
-                interior = interior_point
+                interior = interior_point,
+                ratio = cutting_ratio,
             )
         end
 
@@ -368,17 +370,25 @@ module ImmersedBoundary
 
     `ratio` defines that any cell separated from a boundary by no more than
     `ratio * norm(cell.widths) * sqrt(ndims(msh))` will be flagged as a ghost point.
+
+    `isin` may be a vector of booleans with `true` for in-domain cells.
     """
     function Boundary(
-        msh::Mesh, projections::AbstractMatrix{Float64};
-        ratio::Real = 1.1,
+        msh::Mesh, projections::AbstractMatrix{Float64}, isin = nothing;
+        ratio::Real = 0.0,
     )
+
+        if isnothing(isin)
+            isin = trues(size(projections, 2))
+        end
 
         ϵ = sqrt(eps(eltype(projections)))
 
         projections = eachrow(projections) |> Tuple
 
         distance_field = map((c, p) -> (c .- p) .^ 2, msh.centers, projections) |> sum |> x -> sqrt.(x)
+        @. distance_field *= (2 * isin - 1)
+
         characteristic_lengths = map(w -> w .^ 2, msh.spacing) |> sum |> x -> sqrt.(x)
     
         normals = map(

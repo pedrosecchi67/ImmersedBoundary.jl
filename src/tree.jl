@@ -1149,12 +1149,15 @@ origin is assumed to belong to the interior of the domain.
 If `re_index` is true (default), the cells in the mesh will
 be re-indexed so that exterior cells are given index zero and can no longer
 be accessed.
+
+`ratio` is such that the cell is flagged as interior if signed distance function `d > ratio * norm(widths) * sqrt(ndims(msh))`.
 """
 function clip_interior!(
     root::TreeCell,
     bdries::Stereolitography...;
     interior = nothing,
     re_index::Bool = true,
+    ratio::Real = 0.0,
 )
 
     ncls = set_numbering!(root)
@@ -1166,18 +1169,21 @@ function clip_interior!(
 
     is_interior = trues(ncls)
 
+    nd = ndims(root)
     for stl in bdries
         tree = STLTree(stl)
 
         for lv in lvs
             _, d = tree(lv.center)
 
-            is_interior[lv.index] = is_interior[lv.index] && (
-                !point_in_polygon(
+            is_interior[lv.index] = is_interior[lv.index] && let sd = d * (
+                1 - 2 * point_in_polygon(
                     tree, lv.center;
                     outside_reference = interior
-                ) && (d >= norm(lv.widths) / 2)
+                )
             )
+                sd >= ratio * norm(lv.widths) * sqrt(nd)
+            end
         end
     end
 
