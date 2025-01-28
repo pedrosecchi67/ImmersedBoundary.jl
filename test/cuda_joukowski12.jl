@@ -15,7 +15,12 @@ msh = ibm.Mesh(
                 clipping_surface = stl,
 )
 
-mgrid = ibm.Multigrid(msh)
+mgrid_levels = [
+        ibm.Multigrid(msh, 1),
+        ibm.Multigrid(msh, 2),
+        ibm.Multigrid(msh, 3),
+        ibm.Multigrid(msh),
+]
 
 wall = ibm.Boundary(msh, stl)
 freestream = ibm.Boundary(msh, (1, false), (1, true), (2, false), (2, true))
@@ -104,9 +109,11 @@ impose_bcs! = q -> begin
     ibm.impose_bc!(wall_bc, wall, eachrow(q)...)
     ibm.impose_bc!(freestream_bc, freestream, eachrow(q)...)
 end
-march! = (q; CFL = 100.0, CFL_local = 1.0, use_mgrid = false) -> begin
-    if use_mgrid
+march! = (q; CFL = 100.0, CFL_local = 1.0, mgrid_level = 0) -> begin
+    mgrid = nothing
+    if mgrid_level > 0
         CFL = CFL_local
+        mgrid = mgrid_levels[mgrid_level]
     end
 
     dt = timescale(q; CFL = CFL, CFL_local = CFL_local)
@@ -116,7 +123,7 @@ march! = (q; CFL = 100.0, CFL_local = 1.0, use_mgrid = false) -> begin
         impose_bcs!(_q)
         _q .- q
     end
-    if use_mgrid
+    if mgrid_level > 0
         dq .= mgrid(dq) .* mgrid.size_ratios'
     end
     qright = q .+ dq
@@ -126,7 +133,7 @@ march! = (q; CFL = 100.0, CFL_local = 1.0, use_mgrid = false) -> begin
         impose_bcs!(_q)
         _q .- q
     end
-    if use_mgrid
+    if mgrid_level > 0
         dq .= mgrid(dq) .* mgrid.size_ratios'
     end
     qnew = (q .+ dq .+ qright) ./ 2
@@ -158,7 +165,7 @@ end
 # port everything to GPU
 
 msh = ibm.to_backend(CuArray, msh)
-mgrid = ibm.to_backend(CuArray, mgrid)
+mgrid_levels = map(mgrid -> ibm.to_backend(CuArray, mgrid), mgrid_levels)
 wall = ibm.to_backend(CuArray, wall)
 freestream = ibm.to_backend(CuArray, freestream)
 
@@ -166,27 +173,29 @@ Q = CuArray(Q)
 
 ##################################################
 
-for nit = 1:5000
+for nit = 1:3000
     @time begin
-        if nit < 3000
-            march!(Q; use_mgrid = true)
+        if nit < 1500
+            for level = 1:length(mgrid_levels)
+                march!(Q; mgrid_level = level)
+                march!(Q)
+            end
         end
         resd = march!(Q)
 
         @show nit, resd
     end
 
-    if nit % 100 == 0
+    if nit % 10 == 0
         @show coeffs(Q)
     end
 end
-
 
 ##################################################
 # port everything to CPU
 
 msh = ibm.to_backend(Array, msh)
-mgrid = ibm.to_backend(Array, mgrid)
+mgrid_levels = map(mgrid -> ibm.to_backend(Array, mgrid), mgrid_levels)
 wall = ibm.to_backend(Array, wall)
 freestream = ibm.to_backend(Array, freestream)
 
