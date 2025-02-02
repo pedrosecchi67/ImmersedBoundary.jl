@@ -547,9 +547,9 @@ module STLHandler
     """
     $TYPEDSIGNATURES
 
-    Heuristic indicating whether a line intersects with a bounding box.
+    Check whether a line segment intersects with a box
     """
-    function intersects_heuristic(
+    function intersects(
         box::BoundingBox,
         p1::AbstractVector{Float64}, p2::AbstractVector{Float64}
     )
@@ -561,10 +561,22 @@ module STLHandler
 
         u = @. p2 - p1
 
-        ξ_lb = @. (box_lb - p1) * sign(u) / (abs(u) + ϵ)
-        ξ_ub = @. (box_ub - p1) * sign(u) / (abs(u) + ϵ)
+        # coordinates along u for intersection with box wall planes:
+        ξ = [
+             (@. (box_lb - p1) * sign(u) / (abs(u) + ϵ));
+             (@. (box_ub - p1) * sign(u) / (abs(u) + ϵ))
+        ]
+        clamp!(ξ, - ϵ, 1.0 + ϵ) # clamp to values on the line segment
 
-        return max(maximum(ξ_lb), 0.0) <= min(minimum(ξ_ub), 1.0)
+        intersection_points = u .* ξ' .+ p1
+
+        # check if any of these intersection points is actually on the box:
+        any(
+                all,
+                eachcol(
+                        @. intersection_points >= box_lb && intersection_points <= box_ub
+                )
+        )
 
     end
 
@@ -586,11 +598,11 @@ module STLHandler
 
         n = 0
 
-        if intersects_heuristic(node.left_child.box, p1, p2)
+        if intersects(node.left_child.box, p1, p2)
             n += n_crossings(node.left_child, p1, p2)
         end
 
-        if intersects_heuristic(node.right_child.box, p1, p2)
+        if intersects(node.right_child.box, p1, p2)
             n += n_crossings(node.right_child, p1, p2)
         end
 
