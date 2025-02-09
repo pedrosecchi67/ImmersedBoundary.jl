@@ -294,4 +294,68 @@ module CFD
 
     end
 
+    """
+    $TYPEDFIELDS
+
+    Struct used for time averaging of a given property.
+    Stores exponential moving average (`μ`) and its standard
+    deviation (`σ`) for a moving average timescale `τ`.
+    """
+    mutable struct TimeAverage
+        τ::Real
+        μ::Any
+        σ::Any
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Constructor for a time-averaged property monitor
+    """
+    TimeAverage(τ::Real) = TimeAverage(τ, nothing, nothing)
+
+    """
+    $TYPEDSIGNATURES
+
+    Add registry to a time-averaged property struct.
+
+    Runs:
+
+    ```
+    η = dt / τ
+
+    σ = √(σ ^ 2 * (1 - η) + (μ - Q) ^ 2 * η)
+    μ = μ * (1 - η) + Q * η
+    ```
+    """
+    function Base.push!(avg::TimeAverage, Q, dt = 1.0)
+
+        # first registry
+        if isnothing(avg.μ)
+            avg.μ = copy(Q)
+            avg.σ = avg.μ .* 0.0
+
+            return avg.μ
+        end
+
+        if isa(dt, AbstractArray)
+            if ndims(dt) == 1 && ndims(Q) > 1
+                dt = reshape(dt, fill(1, ndims(Q) - 1)..., length(dt))
+            end
+        end
+
+        η = @. dt / avg.τ
+
+        if isa(Q, AbstractArray)
+            @. avg.σ = sqrt(avg.σ ^ 2 * (1.0 - η) + (avg.μ - Q) ^ 2 * η)
+            @. avg.μ = avg.μ * (1.0 - η) + Q * η
+        else
+            avg.σ = @. sqrt(avg.σ ^ 2 * (1.0 - η) + (avg.μ - Q) ^ 2 * η)
+            avg.μ = @. avg.μ * (1.0 - η) + Q * η
+        end
+
+        avg.μ
+
+    end
+
 end # module CFD

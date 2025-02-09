@@ -554,10 +554,15 @@ module STLHandler
         p1::AbstractVector{Float64}, p2::AbstractVector{Float64}
     )
 
-        ϵ = sqrt(eps(eltype(p1)))
+        ϵ = eltype(p1) |> eps |> sqrt
 
-        box_lb = @. box.origin
+        box_lb = copy(box.origin)
         box_ub = @. box.origin + box.widths
+
+        @. box_ub -= box_lb
+        p1 = p1 .- box_lb
+        p2 = p2 .- box_lb
+        @. box_lb -= box_lb # zero
 
         u = @. p2 - p1
 
@@ -574,7 +579,10 @@ module STLHandler
         any(
                 all,
                 eachcol(
-                        @. intersection_points >= box_lb && intersection_points <= box_ub
+                        @. (
+                            intersection_points >= box_lb - box.widths * 0.001 && 
+                            intersection_points <= box_ub + box.widths * 0.001
+                        )
                 )
         )
 

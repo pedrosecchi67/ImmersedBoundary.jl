@@ -173,22 +173,28 @@ Q = CuArray(Q)
 
 ##################################################
 
-for nit = 1:3000
-    @time begin
-        if nit < 1500
-            for level = 1:length(mgrid_levels)
-                march!(Q; mgrid_level = level)
-                march!(Q)
+let Qavg = ibm.CFD.TimeAverage(300.0)
+    for nit = 1:3000
+        @time begin
+            if nit < 1500
+                for level = 1:length(mgrid_levels)
+                    march!(Q; mgrid_level = level)
+                    march!(Q)
+                end
             end
+            resd = march!(Q)
+
+            push!(Qavg, Q)
+
+            @show nit, resd
         end
-        resd = march!(Q)
 
-        @show nit, resd
+        if nit % 10 == 0
+            @show coeffs(Qavg.μ)
+        end
     end
 
-    if nit % 10 == 0
-        @show coeffs(Q)
-    end
+    Q .= Qavg.μ
 end
 
 ##################################################
