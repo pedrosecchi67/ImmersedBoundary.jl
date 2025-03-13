@@ -416,8 +416,8 @@ module ImmersedBoundary
 
         image_distances = let cl = select(characteristic_lengths)
             @. max(
-                   distances + cl * (sqrt(nd) * ratio),
-                   cl * sqrt(nd)
+                   distances + cl * (sqrt(nd) * ratio) / 2,
+                   cl * sqrt(nd) / 2
             )
         end
 
