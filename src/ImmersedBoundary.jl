@@ -681,7 +681,7 @@ module ImmersedBoundary
     end
 
     """
-    $TYPEDFIELDS
+    $TYPEDSIGNATURES
 
     Obtain a surface from a mesh and a stereolitography object.
 
