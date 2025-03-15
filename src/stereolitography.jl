@@ -13,26 +13,104 @@ module STLHandler
         
     module STLReader
 
-        using MeshIO, FileIO, GeometryBasics
+        function is_ascii(file_path::String)
+            # Open the file in read mode
+            first_string = open(file_path, "r") do file
+                # Read the first 5 characters from the file
+                first_chars = read(file, 5)
+
+                # Convert the read bytes to a string
+                first_string = String(first_chars)
+            end
+
+            return first_string == "solid"
+        end
+
+        function read_stl_ascii(filename::String)
+            vertices = Vector{Vector{Float64}}()
+            faces = Vector{Vector{Int64}}()
+
+            face = Int64[]
+            open(filename, "r") do file
+                for _line in eachline(file)
+                    line = strip(_line)
+
+                    if startswith(line, "vertex")
+                        # Extract vertex coordinates
+                        coords = split(line)
+                        x = parse(Float64, coords[2])
+                        y = parse(Float64, coords[3])
+                        z = parse(Float64, coords[4])
+                        push!(vertices, [x, y, z])
+                        push!(face, length(vertices))
+                    elseif startswith(line, "facet normal")
+                        # Start of a new face
+                        face = Vector{Int64}()
+                    elseif startswith(line, "endloop")
+                        # End of a face, add it to the faces list
+                        push!(faces, face)
+                    end
+                end
+            end
+
+            vertices = reduce(hcat, vertices)
+            faces = reduce(hcat, faces)
+
+            return vertices, faces
+        end
+
+        function read_stl_binary(filename::String)
+                contents = open(filename, "r") do file
+                    read(file)
+                end
+
+                N0 = 0
+                popN = N -> let r = (N0+1):(N0+N)
+                    v = contents[r]
+                    N0 += N
+
+                    v
+                end
+
+                # header
+                _ = popN(80)
+
+                # number of tris
+                ntri = reinterpret(UInt32, popN(4))[1] |> Int64
+
+                points = zeros(Float64, 3, 3 * ntri)
+                simplices = zeros(Int64, 3, ntri)
+
+                for k = 1:ntri
+                    _ = popN(12) # normal
+
+                    points[:, 3*(k-1)+1] .= Float64.(reinterpret(Float32, popN(12)))
+                    points[:, 3*(k-1)+2] .= Float64.(reinterpret(Float32, popN(12)))
+                    points[:, 3*(k-1)+3] .= Float64.(reinterpret(Float32, popN(12)))
+
+                    simplices[:, k] .= (3*(k-1)+1):(3*(k-1)+3)
+
+                    _ = popN(2)
+                end
+
+                (points, simplices)
+        end
 
         """
-        Read STL file using MeshIO, FileIO
+        ```
+            read_stl(filename::String)
+        ```
+
+        Read STL file and return a matrix of points (shape (3, ...)) and a matrix of
+        simplices (shape (3, ...)).
         """
-        function read_stl(fname::String)
+        function read_stl(filename::String)
 
-            msh = load(fname)
+            if is_ascii(filename)
+                return read_stl_ascii(filename)
+            end
 
-            points = mapreduce(
-                            face -> let vertices = msh.position[face]
-                                mapreduce(v -> Float64.(collect(v.data)), hcat, vertices)
-                            end,
-                            hcat,
-                            faces(msh)
-                            )
-
-            simplices = reshape(collect(1:size(points, 2)), size(points, 1), :)
-
-            (points, simplices)
+            read_stl_binary(filename)
 
         end
 
