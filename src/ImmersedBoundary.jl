@@ -175,7 +175,7 @@ module ImmersedBoundary
         refinement_regions = [],
         clipping_surface = nothing,
         interior_point = nothing,
-        buffer_layer_depth::Int64 = 3,
+        buffer_layer_depth::Int64 = 2,
         intersection_detection_ratio::Float64 = 1.1,
         cutting_ratio::Float64 = - 1.1,
         split_size::Int64 = 2,
