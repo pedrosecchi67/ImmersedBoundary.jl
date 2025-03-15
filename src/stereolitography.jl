@@ -465,7 +465,7 @@ module STLHandler
 
         n = cross(simplex[:, 2] .- p0, simplex[:, 3] .- p0)
 
-        n ./ (norm(v) + ϵ)
+        n ./ (norm(n) + ϵ)
 
     end
 
