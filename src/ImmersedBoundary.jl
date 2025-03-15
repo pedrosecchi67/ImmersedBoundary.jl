@@ -445,23 +445,33 @@ module ImmersedBoundary
 
     `ratio` defines that any cell separated from a boundary by no more than
     `ratio * norm(cell.widths) * sqrt(ndims(msh))` will be flagged as a ghost point.
+
+    The projection to the surface is approximated for cells that are far from the boundary
+    by distances greater than `norm(widths) * approximation_ratio`.
     """
     function Boundary(
         msh::Mesh, stls::Stereolitography...;
         ratio::Real = 0.0,
+        approximation_ratio::Real = 1.2,
     )
 
         stl_joint = cat(stls...)
         stltree = STLTree(stl_joint)
 
-        lvs = leaves(msh.tree)
-        projs = map(
-            l -> stltree(l.center)[1],
-            lvs
-        ) |> x -> reduce(hcat, x)
-        isin = map(
-            l -> !point_in_polygon(stltree, l.center; outside_reference = msh.interior_point),
-            lvs
+        projs, _ = projections_and_distances(
+            msh.tree, stl_joint;
+            approximation_ratio = max(
+                approximation_ratio, ratio * 2
+            ) # avoid having image points in the approximation region
+        )
+
+        isin = trues(length(msh))
+        _flag_interior!(
+            isin,
+            msh.tree,
+            stltree,
+            msh.interior_point,
+            0.0
         )
 
         Boundary(msh, projs, isin; ratio = ratio)

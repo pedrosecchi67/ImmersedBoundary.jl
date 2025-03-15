@@ -161,7 +161,7 @@ coeffs = q -> let _q = wall_surface(q)
 end
 
 let Qavg = ibm.CFD.TimeAverage(300.0)
-    for nit = 1:3000
+    for nit = 1:10000
         @time begin
             if nit < 1500
                 for level = 1:length(mgrid_levels)
@@ -196,11 +196,12 @@ Mach = @. sqrt(u ^ 2 + v ^ 2) / a
 vtk = ibm.vtk_grid("n0012", msh;
                 p = p, T = T, u = u, v = v,
                 ρ = ρ, Mach = Mach, Cp = Cp,
-               dt = dt)
+               dt = dt, 
+               distance = wall.distance_field)
 ibm.vtk_save(vtk)
 
 vtk = ibm.surf2vtk("surface_n0012", wall_surface;
                 p = p, T = T, u = u, v = v,
-                ρ = ρ, Mach = Mach, Cp = Cp)
+                ρ = ρ, Mach = Mach, Cp = Cp, distance = wall.distance_field)
 ibm.vtk_save(vtk)
 

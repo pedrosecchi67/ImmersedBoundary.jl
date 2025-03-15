@@ -364,6 +364,7 @@ function _projections!(
     root::TreeCell,
     tree::STLTree;
     interior_only::Bool = false,
+    approximation_ratio::Real = 0.0
 )
 
     if isleaf(root)
@@ -387,11 +388,31 @@ function _projections!(
             return
         end
 
-        for ch in root.children
-            _projections!(
-                dists, projs,
-                ch, tree; interior_only = interior_only
-            )
+        # beyond approximation ratio * circumradius?
+        # truncate to same projection
+        approx_projection = nothing
+        if approximation_ratio > 0.0
+            R = norm(root.widths) / 2
+            p, d = tree(root.center)
+
+            if d > R * approximation_ratio
+                approx_projection = p
+            end
+        end
+
+        if !isnothing(approx_projection)
+            for lv in leaves(root)
+                projs[:, lv.index] .= approx_projection
+                dists[lv.index] = norm(approx_projection .- lv.center)
+            end
+        else # otherwise calculate
+            for ch in root.children
+                _projections!(
+                    dists, projs,
+                    ch, tree; interior_only = interior_only,
+                    approximation_ratio = approximation_ratio
+                )
+            end
         end
     end
 
@@ -427,12 +448,16 @@ end
 """
 $TYPEDSIGNATURES
 
-Find the projections and distances of each cell's center on a stereolitography object
+Find the projections and distances of each cell's center on a stereolitography object.
+
+The projection to the surface is approximated for cells that are far from the boundary
+by distances greater than `norm(leaf.widths) * approximation_ratio`.
 """
 function projections_and_distances(
     root::TreeCell,
     stl::Stereolitography;
     interior_only::Bool = false,
+    approximation_ratio::Real = 0.0,
 )
 
     tree = STLTree(stl)
@@ -444,7 +469,9 @@ function projections_and_distances(
     projs = Matrix{Float64}(undef, ndims(root), nc)
 
     _projections!(
-        dists, projs, root, tree; interior_only = interior_only
+        dists, projs, root, tree; 
+        interior_only = interior_only,
+        approximation_ratio = approximation_ratio,
     )
 
     if interior_only
@@ -1138,6 +1165,57 @@ function octree2graph(
 end
 
 """
+Recursive private function to flag interior points without going down
+branches that are completely within/without the domain
+"""
+function _flag_interior!(
+    interior,
+    root::TreeCell,
+    stltree::STLTree,
+    interior_reference::AbstractVector{Float64},
+    ratio::Real,
+)
+
+    D = norm(root.widths) # circumdiameter
+    nd = ndims(root)
+
+    _, d = stltree(root.center)
+    sd = let sgn = (
+        1 - 2 * point_in_polygon(
+            stltree, root.center;
+            outside_reference = interior_reference
+        )
+    )
+        sgn * d
+    end
+    threshold = D * sqrt(nd) * ratio
+
+    if isleaf(root)
+        interior[root.index] = interior[root.index] && (sd >= threshold)
+    else
+        # might have a leaf inside the domain?
+        only_inside = sd - (threshold > 0.0 ? threshold : 0.0) - D / 2 * 1.1 > 0.0
+        only_outside = - sd - (threshold < 0.0 ? - threshold : 0.0) - D / 2 * 1.1 > 0.0
+
+        if only_inside
+            return
+        elseif only_outside
+            for lv in leaves(root)
+                interior[lv.index] = false
+            end
+        else # continue recursively
+            for ch in root.children
+                _flag_interior!(
+                    interior, ch,
+                    stltree, interior_reference, ratio
+                )
+            end
+        end
+    end
+
+end
+
+"""
 $TYPEDSIGNATURES
 
 Find mask to points in the interior of a domain
@@ -1161,30 +1239,22 @@ function clip_interior!(
 )
 
     ncls = set_numbering!(root)
-    lvs = leaves(root)
 
     if isnothing(interior)
         interior = root.origin .- 0.1 .* root.widths
     end
 
     is_interior = trues(ncls)
-
-    nd = ndims(root)
     for stl in bdries
         tree = STLTree(stl)
 
-        for lv in lvs
-            _, d = tree(lv.center)
-
-            is_interior[lv.index] = is_interior[lv.index] && let sd = d * (
-                1 - 2 * point_in_polygon(
-                    tree, lv.center;
-                    outside_reference = interior
-                )
-            )
-                sd >= ratio * norm(lv.widths) * sqrt(nd)
-            end
-        end
+        _flag_interior!(
+            is_interior,
+            root,
+            tree,
+            interior,
+            ratio
+        )
     end
 
     set_mask!(root, is_interior)
