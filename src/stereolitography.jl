@@ -452,7 +452,7 @@ module STLHandler
 
     Build an STL distance tree from a stereolitography object
     """
-    function STLTree(stl::Stereolitography; leaf_size::Int64 = 10)
+    function STLTree(stl::Stereolitography; leaf_size::Int64 = 1)
 
         box = BoundingBox(stl)
 
