@@ -367,45 +367,51 @@ module STLHandler
 
     """
     $TYPEDSIGNATURES
-                    
+
     Project point onto a simplex
     """
     function proj2simplex(
-        simplex::AbstractMatrix, point::AbstractVector  
+        simplex::AbstractMatrix, point::AbstractVector
     )
-                  
+
         if size(simplex, 2) == 1
             return vec(simplex)
+        elseif size(simplex, 2) == 2 # optimized for lines
+            p0 = simplex[:, 1]
+            u = simplex[:, 2] .- p0
+
+            ξ = clamp(
+                ((point .- p0) ⋅ u) / (u ⋅ u + eps(eltype(simplex))),
+                0.0, 1.0
+            )
+
+            return p0 .+ u .* ξ
         end
 
         p0 = simplex[:, 1]
         M = simplex[:, 2:end] .- p0
-                
+
         dp = (point .- p0)
         x = M \ dp
-               
-        if sum(x) > 1.0 || any(x .< 0.0)
-            isval = trues(size(simplex, 2))
-        
-            projs = map(
-                i -> begin   
-                    isval[i] = false
-           
-                    face = simplex[:, isval]
-        
-                    isval[i] = true
-                    
-                    proj2simplex(face, point)
-                end,
-                1:length(isval)
-            )    
-         
-            _, i = findmin(
-                p -> norm(p .- point),
-                projs
-            )
 
-            return projs[i]
+        nd = size(simplex, 2)
+        if sum(x) > 1.0 || any(x .< 0.0)
+            closest_proj = similar(dp)
+            dist = Inf
+
+            for i = 1:nd
+                face = simplex[:, setdiff(1:nd, i)]
+
+                proj = proj2simplex(face, point)
+                d = norm(proj .- point)
+
+                if d < dist
+                    closest_proj .= proj
+                    dist = d
+                end
+            end
+
+            return closest_proj
         end
 
         p0 .+ (M * x)
@@ -417,14 +423,21 @@ module STLHandler
 
     Obtain projection of a point onto a stereolitography object
     """
-    proj2stl(stl::Stereolitography, x::AbstractVector) = let ps = mapslices(
-        simplex -> proj2simplex(view(stl.points, :, simplex), x),
-        stl.simplices;
-        dims = 1
-    )
-        _, i = findmin(p -> norm(p .- x), eachcol(ps))
+    function proj2stl(stl::Stereolitography, x::AbstractVector)
+        minproj = similar(x)
+        mindist = Inf
 
-        ps[:, i]
+        for simp in eachcol(stl.simplices)
+                proj = proj2simplex(stl.points[:, simp], x)
+                d = norm(x .- proj)
+
+                if d < mindist
+                        mindist = d
+                        minproj .= proj
+                end
+        end
+
+        return minproj
     end
 
     """
