@@ -897,9 +897,11 @@ module STLHandler
         Aproj = Xinv * projs' |> permutedims
         Adist = Xinv * dists
 
+        center = origin .+ widths ./ 2
+
         dist_dev = 0.0
         dmin = Inf
-        center = origin .+ widths ./ 2
+        violated_sign = false
         for pt in eachcol(pts)
             test_pt = @. (center + pt) / 2
 
@@ -910,9 +912,13 @@ module STLHandler
 
             dist_dev = max(abs(dhat - d), dist_dev)
             dmin = min(dmin, abs(d))
+
+            if d * dhat < - atol ^ 2
+                violated_sign = true
+            end
         end
 
-        refine = dist_dev > max(0.0, dmin - norm(widths) / 2) * rtol + atol
+        refine = violated_sign || dist_dev > max(0.0, dmin - norm(widths) / 2) * rtol + atol
 
         (Aproj, Adist, refine)
     end

@@ -4,7 +4,7 @@ stl = ibm.Stereolitography("n0012.dat")
 
 L = 20.0
 
-field = ibm.DistanceField(stl, [-L/2,-L/2], [L,L]; atol = 1e-3, rtol = 0.2)
+field = ibm.DistanceField(stl, [-L/2,-L/2], [L,L]; atol = 1e-10)
 
 msh = ibm.Mesh(
                [-L/2,-L/2], [L,L],
