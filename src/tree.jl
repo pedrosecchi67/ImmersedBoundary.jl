@@ -201,6 +201,35 @@ using .STLHandler
 """
 $TYPEDSIGNATURES
 
+Function to convert stereolitography objects to trees.
+Leaves distance fields and trees untouched.
+Warns the user that distance fields are advised if 3D
+STLTrees are being constructed.
+"""
+function to_distance_metric(obj::Union{Stereolitography, STLTree, DistanceField}, 
+        context::String)
+
+    if obj isa Stereolitography
+        if size(obj.points, 1) == 3
+            @warn "3D stereolitography object passed for distance calculations in context $context. DistanceField(STLTree(stl), origin, widths) is recommended to avoid excessive costs."
+        end
+
+        return STLTree(obj)
+    elseif obj isa STLTree
+        if size(obj.stl.points, 1) == 3
+            @warn "3D stereolitography dist. tree passed for distance calculations in context $context. DistanceField(tree, origin, widths) is recommended to avoid excessive costs."
+        end
+
+        return obj
+    end
+
+    obj # distance field (no warnings)
+
+end
+
+"""
+$TYPEDSIGNATURES
+
 Define `c.index` for each cell (recursively).
 
 Non-leaf cells are given index 0
@@ -362,7 +391,7 @@ function _projections!(
     dists::AbstractVector,
     projs::AbstractMatrix,
     root::TreeCell,
-    tree::STLTree;
+    tree::Union{STLTree, DistanceField};
     interior_only::Bool = false,
     approximation_ratio::Real = 0.0
 )
@@ -455,12 +484,12 @@ by distances greater than `norm(leaf.widths) * approximation_ratio`.
 """
 function projections_and_distances(
     root::TreeCell,
-    stl::Stereolitography;
+    stl::Union{Stereolitography, STLTree, DistanceField};
     interior_only::Bool = false,
     approximation_ratio::Real = 0.0,
 )
 
-    tree = STLTree(stl)
+    tree = to_distance_metric(stl, "projections_and_distances")
 
     lvs = leaves(root)
     nc = length(lvs)
@@ -497,7 +526,7 @@ The default value of ratio is `sqrt(ndims(root))`
 """
 function _intersections(
     root::TreeCell,
-    tree::STLTree;
+    tree::Union{STLTree, DistanceField};
     ratio = nothing,
     interior_only::Bool = false,
 )
@@ -561,10 +590,10 @@ The default value of ratio is `sqrt(ndims(root))`
 """
 intersections(
     root::TreeCell,
-    stl::Stereolitography;
+    stl::Union{Stereolitography, STLTree, DistanceField};
     ratio = nothing,
     interior_only::Bool = false,
-) = let tree = STLTree(stl)
+) = let tree = to_distance_metric(stl, "intersections")
     _intersections(root, tree; ratio = ratio, interior_only = interior_only)
 end
 
@@ -755,14 +784,14 @@ Refine octree to have a maximum cell size at the boundary specified by the stere
 """
 function boundary_refine!(
     root::TreeCell,
-    stl::Stereolitography,
+    stl::Union{Stereolitography, STLTree, DistanceField},
     max_size::Real;
     ratio::Real = 2.0,
     buffer_layer_depth::Int = 2,
     recursive_split::Bool = false,
 )
 
-    tree = STLTree(stl)
+    tree = to_distance_metric(stl, "boundary_refine!")
 
     nref = 1
 
@@ -1171,7 +1200,7 @@ branches that are completely within/without the domain
 function _flag_interior!(
     interior,
     root::TreeCell,
-    stltree::STLTree,
+    stltree::Union{STLTree, DistanceField},
     interior_reference::AbstractVector{Float64},
     ratio::Real,
 )
@@ -1232,7 +1261,7 @@ be accessed.
 """
 function clip_interior!(
     root::TreeCell,
-    bdries::Stereolitography...;
+    bdries::Union{Stereolitography, STLTree, DistanceField}...;
     interior = nothing,
     re_index::Bool = true,
     ratio::Real = 0.0,
@@ -1246,7 +1275,7 @@ function clip_interior!(
 
     is_interior = trues(ncls)
     for stl in bdries
-        tree = STLTree(stl)
+        tree = to_distance_metric(stl, "clip_interior!")
 
         _flag_interior!(
             is_interior,

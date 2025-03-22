@@ -168,10 +168,25 @@ module ImmersedBoundary
         interior_point = [0.0, 0.0] # reference point in the interior of the domain. Defaults to origin
     )
     ```
+
+    The stereolitographies may also be replaced by pre-built distance field trees 
+    (which optimize point-in-poly queries and distance calculations):
+
+    ```
+    tree = ibm.STLTree(stl)
+    ```
+
+    Or by approximate distance fields built from said trees using a given tolerance:
+
+    ```
+    field = ibm.DistanceField(stl; atol = 1e-3) # Or DistanceField(tree; atol = 1e-3)
+    ```
+
+    This is highly recommended for better performance with 3D geometries.
     """
     function Mesh(
         origin::AbstractVector{Float64}, widths::AbstractVector{Float64},
-        surfaces::Pair{Stereolitography, Float64}...;
+        surfaces...;
         refinement_regions = [],
         clipping_surface = nothing,
         interior_point = nothing,
@@ -441,25 +456,39 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Obtain boundary from stereolitography objects.
+    Obtain boundary from a stereolitography object.
 
     `ratio` defines that any cell separated from a boundary by no more than
-    `ratio * norm(cell.widths) * sqrt(ndims(msh))` will be flagged as a ghost point.
+    `ratio * norm(cell.widths) * sqrt(ndims(msh)) / 2` will be flagged as a ghost point.
 
     The projection to the surface is approximated for cells that are far from the boundary
     by distances greater than `norm(widths) * approximation_ratio`.
+
+    The stereolitographies may also be replaced by pre-built distance field trees 
+    (which optimize point-in-poly queries and distance calculations):
+
+    ```
+    tree = ibm.STLTree(stl)
+    ```
+
+    Or by approximate distance fields built from said trees using a given tolerance:
+
+    ```
+    field = ibm.DistanceField(stl; atol = 1e-3) # Or DistanceField(tree; atol = 1e-3)
+    ```
+
+    This is highly recommended for better performance with 3D geometries.
     """
     function Boundary(
-        msh::Mesh, stls::Stereolitography...;
+        msh::Mesh, stl::Union{Stereolitography, STLTree, DistanceField};
         ratio::Real = 0.0,
         approximation_ratio::Real = 1.2,
     )
 
-        stl_joint = cat(stls...)
-        stltree = STLTree(stl_joint)
+        stltree = to_distance_metric(stl, "Boundary")
 
         projs, _ = projections_and_distances(
-            msh.tree, stl_joint;
+            msh.tree, stltree;
             approximation_ratio = max(
                 approximation_ratio, ratio * 2
             ) # avoid having image points in the approximation region

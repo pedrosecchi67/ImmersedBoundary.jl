@@ -4,15 +4,20 @@ stl = ibm.Stereolitography("n0012.dat")
 
 L = 20.0
 
+field = ibm.DistanceField(stl, [-L/2,-L/2], [L,L]; atol = 1e-3, rtol = 0.2)
+
 msh = ibm.Mesh(
                [-L/2,-L/2], [L,L],
-               stl => 0.0025;
+               field => 0.0025;
                refinement_regions = [
                     ibm.Ball([0.0, 0.0], 0.05) => 0.001,
                     ibm.Ball([1.0, 0.0], 0.05) => 0.001,
                 ],
-                clipping_surface = stl,
+               clipping_surface = field,
 )
+vtk = ibm.vtk_grid("n0012", msh)
+ibm.vtk_save(vtk)
+exit()
 
 mgrid_levels = [
         ibm.Multigrid(msh, 1),
@@ -21,7 +26,7 @@ mgrid_levels = [
         ibm.Multigrid(msh),
 ]
 
-wall = ibm.Boundary(msh, stl)
+wall = ibm.Boundary(msh, field)
 freestream = ibm.Boundary(msh, (1, false), (1, true), (2, false), (2, true))
 wall_surface = ibm.Surface(msh, stl, 0.005)
 
@@ -161,7 +166,7 @@ coeffs = q -> let _q = wall_surface(q)
 end
 
 let Qavg = ibm.CFD.TimeAverage(300.0)
-    for nit = 1:10000
+    for nit = 1:10
         @time begin
             if nit < 1500
                 for level = 1:length(mgrid_levels)

@@ -103,6 +103,34 @@ inlet = Boundary(
 )
 ```
 
+### Triangle and Barnes-Hut trees
+
+We may build a tree structure to optimize point-in-poly queries and distance calculations in the functions above.
+This is done with:
+
+```julia
+tree = ibm.STLTree(stl)
+```
+
+To optimize even further, we may build an approximate distance field via a Barnes-Hut tree:
+
+```julia
+origin = [-2.0, -2.0, -2.0]
+widths = [4.0, 4.0, 4.0] # hypercube boundaries for distance field range
+field = ibm.DistanceField(tree, origin, widths; atol = 1e-3) # or ibm.DistanceField(stl, origin, widths; atol = 1e-3)
+```
+
+This is highly recommended for good performance with 3D geometries.
+
+It suffices to replace the stereolitography objects by the distance fields/trees in the functions above. Just note that interior_references must be specified during `DistanceField` struct construction:
+
+```julia
+field = ibm.DistanceField(stl, origin, widths; atol = 1e-3, 
+    outside_reference = [0.0, 0.0, 0.0])
+```
+
+...and other definitions will be void.
+
 ### Residual evaluation
 
 To evaluate residuals, one may use stencil points and cell spacing information for the mesh.

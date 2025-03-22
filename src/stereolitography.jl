@@ -9,7 +9,7 @@ module STLHandler
     using Statistics
     using LinearAlgebra
 
-    export Stereolitography, STLTree, point_in_polygon, stl2vtk, refine_to_length
+    export Stereolitography, STLTree, DistanceField, point_in_polygon, stl2vtk, refine_to_length
         
     module STLReader
 
@@ -834,86 +834,202 @@ module STLHandler
 
     end
 
-end
+    _exponents(nd::Int64) = Iterators.product(
+        fill((0, 1), nd)...
+    ) |> collect |> vec
 
-#=
-using .STLHandler
-
-theta = collect(LinRange(0.0, 2 * π, 400))
-
-stl = Stereolitography(
-    [
-        cos.(theta)';
-        sin.(theta)'
-    ]
-)
-
-tree = STLTree(stl; leaf_size = 10)
-
-@show tree([-2.0, 2.0])
-
-X = rand(2, 1000)
-for _ = 1:10
-    @time for x in eachcol(X)
-        tree(x)
+    """
+    Convert coordinates to bilinear basis
+    """
+    to_bilinear(coords::AbstractVector{Float64}) = let exps = _exponents(length(coords))
+        map(e -> prod(coords .^ e), exps)
     end
-end
+    to_bilinear(coords::AbstractMatrix{Float64}) = mapslices(to_bilinear, coords; dims = 1)
 
-@show point_in_polygon(tree, [-2.0, 2.0])
-@show point_in_polygon(tree, [0.3, 0.2])
+    """
+    Obtain corners of a hypercube
+    """
+    function hypercube_corners(origin::Vector{Float64}, widths::Vector{Float64})
+        d = length(origin)  # Dimensionality of the hypercube
+        n_corners = 2^d     # Number of corners in a hypercube
 
-stl = Stereolitography(
-    [
-        -1.0 0.0 0.0 1.0 1.0 (-1.0);
-        0.0 0.0 0.5 0.5 1.0 1.0
-    ];
-    closed = true
-)
-tree = STLTree(stl)
-analytic_isin = p -> let (x, y) = p
-    if x < -1.0
-        return false
-    end
+        # Initialize the matrix to store the corner coordinates
+        pts = zeros(Float64, d, n_corners)
 
-    if x > 1.0
-        return false
-    end
-
-    if x <= 0.0
-        if y > 0.0 && y < 1.0
-            return true
-        else
-            return false
+        # Generate all combinations of corners
+        for i in 0:(n_corners-1)
+            for j in 1:d
+                # Determine if the j-th dimension is at the origin or origin + width
+                pts[j, i+1] = origin[j] + ((i >> (j-1)) & 1) * widths[j]
+            end
         end
-    else
-        if y > 0.5 && y < 1.0
-            return true
-        else
-            return false
-        end
+
+        return pts
     end
+
+    """
+    Make linear regressions for the projection and signed distance to a surface
+    as a function of spatial position. Returned in matrix and vector form, respectively.
+    Uses corners as exact data points.
+    Also returns boolean indicating whether additional refinement is needed.
+    """
+    function proj_distance_regression(
+            tree::STLTree, origin::Vector{Float64}, widths::Vector{Float64};
+            outside_reference = nothing,
+            atol::Float64, rtol::Float64,
+    )
+        pts = hypercube_corners(origin, widths)
+        X = to_bilinear(pts)
+
+        projs = similar(pts)
+        dists = Vector{Float64}(undef, size(pts, 2))
+
+        for (j, c) in enumerate(eachcol(pts))
+            p, d = tree(c)
+            d *= (1 - 2 * point_in_polygon(tree, c; outside_reference = outside_reference))
+
+            projs[:, j] .= p
+            dists[j] = d
+        end
+
+        Xinv = pinv(X')
+
+        Aproj = Xinv * projs' |> permutedims
+        Adist = Xinv * dists
+
+        dist_dev = 0.0
+        dmin = Inf
+        center = origin .+ widths ./ 2
+        for pt in eachcol(pts)
+            test_pt = @. (center + pt) / 2
+
+            _, d = tree(test_pt)
+            d *= (1 - 2 * point_in_polygon(tree, test_pt; outside_reference = outside_reference))
+
+            dhat = Adist ⋅ to_bilinear(test_pt)
+
+            dist_dev = max(abs(dhat - d), dist_dev)
+            dmin = min(dmin, abs(d))
+        end
+
+        refine = dist_dev > max(0.0, dmin - norm(widths) / 2) * rtol + atol
+
+        (Aproj, Adist, refine)
+    end
+
+    """
+    $TYPEDFIELDS
+
+    Struct to describe an approximate distance field via Barnes-Hut tree
+    """
+    struct DistanceField
+        Aproj::Union{Matrix{Float64}, Nothing}
+        Adist::Union{Vector{Float64}, Nothing}
+        left_field::Union{DistanceField, Nothing}
+        right_field::Union{DistanceField, Nothing}
+        split_dim::Int64
+        split_point::Float64
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Constructor for an approximate distance field via Barnes-Hut tree.
+
+    Splitting of the Barnes-Hutt tree is stopped once the deviations in signed distance function
+    predictions respect relative and absolute tolerances `atol, rtol`.
+    """
+    function DistanceField(
+        tree_or_stl::Union{STLTree, Stereolitography}, origin::Vector{Float64}, widths::Vector{Float64};
+        outside_reference = nothing, 
+        atol::Float64 = 1e-3,
+        rtol::Float64 = 0.5,
+        _depth::Int64 = 1
+    )
+        tree = (
+            tree_or_stl isa STLTree ?
+            tree_or_stl :
+            STLTree(tree_or_stl)
+        )
+
+        Aproj, Adist, refine = proj_distance_regression(tree, origin, widths; 
+                                                        atol = atol, 
+                                                        rtol = rtol,
+                                                        outside_reference = outside_reference)
+
+        if refine # split!
+            if _depth > length(origin)
+                _depth = 1
+            end
+
+            new_widths = copy(widths)
+            new_widths[_depth] /= 2
+            
+            left_origin = copy(origin)
+            right_origin = copy(origin)
+            right_origin[_depth] += new_widths[_depth]
+
+            return DistanceField(
+                                 nothing, nothing,
+                                 DistanceField(tree, left_origin, new_widths; atol = atol, rtol = rtol, 
+                                               outside_reference = outside_reference, _depth = _depth + 1),
+                                 DistanceField(tree, right_origin, new_widths; atol = atol, rtol = rtol, 
+                                               outside_reference = outside_reference, _depth = _depth + 1),
+                                 _depth, right_origin[_depth]
+            )
+        end
+
+        DistanceField(Aproj, Adist,
+                     nothing, nothing,
+                    0, 0.0)
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Find projection to a surface and distance using an approximate distance field
+    """
+    function (field::DistanceField)(x::AbstractVector)
+
+        f = field
+        while f.split_dim != 0 # not a leaf
+            if x[f.split_dim] < f.split_point
+                f = f.left_field
+            else
+                f = f.right_field
+            end
+        end
+
+        ξ = to_bilinear(x)
+        p = f.Aproj * ξ
+
+        (p, norm(p .- x))
+
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Point-in-polygon query using a distance field.
+    Note that the external reference must be used passed when the distance field 
+    is created. Kwargs are dummies.
+    """
+    function point_in_polygon(field::DistanceField, x::AbstractVector; kwargs...)
+
+        f = field
+        while f.split_dim != 0 # not a leaf
+            if x[f.split_dim] < f.split_point
+                f = f.left_field
+            else
+                f = f.right_field
+            end
+        end
+
+        ξ = to_bilinear(x)
+        sdf = f.Adist ⋅ ξ
+
+        (sdf < 0.0)
+
+    end
+
 end
-
-for x in (rand(2, 20) .- 0.5) .* 4 |> eachcol
-    @show x
-    @show point_in_polygon(tree, x)
-    @show analytic_isin(x)
-end
-
-stl = Stereolitography(
-    [
-        0.0 1.0 1.0 0.0;
-        0.0 0.0 1.0 0.125;
-        0.0 0.0 0.0 0.0
-    ],
-    [
-        1 2 3;
-        3 4 1
-    ] |> permutedims
-)
-
-stl = refine_to_length(stl, 0.25)
-
-vtk = stl2vtk("test", stl)
-STLHandler.vtk_save(vtk)
-=#
