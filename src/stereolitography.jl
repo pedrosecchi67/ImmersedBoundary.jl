@@ -318,27 +318,24 @@ module STLHandler
 
         coords = eachrow(centers)
 
-        planes = map(median, coords)
         splits = map(
-            (plane, u) -> (
-                (@. u <= plane),
-                (@. u > plane)
-            ),
-            planes, coords
+            u -> begin
+                asrt = sortperm(u)
+                N = length(asrt) ÷ 2
+
+                (
+                    asrt[1:N], asrt[(N+1):end]
+                )
+            end,
+            coords
         )
 
         metric = map(
-            sep -> let (ls, rs) = sep
-                min(
-                    1.0 - sum(ls) / length(ls),
-                    1.0 - sum(rs) / length(rs),
-                )
-            end,
-            splits
+            u -> (maximum(u) - minimum(u)),
+            coords
         )
         dim = argmax(metric)
-        left_simplices, right_simplices = findall.(splits[dim])
-        plane = planes[dim]
+        left_simplices, right_simplices = splits[dim]
 
         (
             Stereolitography(
@@ -347,7 +344,6 @@ module STLHandler
             Stereolitography(
                 stl.points, view(stl.simplices, :, right_simplices)
             ),
-            dim, plane
         )
 
     end
@@ -476,7 +472,7 @@ module STLHandler
             )
         end
 
-        lstl, rstl, _, _ = split_at_plane(stl)
+        lstl, rstl = split_at_plane(stl)
 
         STLTree(
             STLTree(lstl; leaf_size = leaf_size), STLTree(rstl; leaf_size = leaf_size),
@@ -835,85 +831,3 @@ module STLHandler
     end
 
 end
-
-#=
-using .STLHandler
-
-theta = collect(LinRange(0.0, 2 * π, 400))
-
-stl = Stereolitography(
-    [
-        cos.(theta)';
-        sin.(theta)'
-    ]
-)
-
-tree = STLTree(stl; leaf_size = 10)
-
-@show tree([-2.0, 2.0])
-
-X = rand(2, 1000)
-for _ = 1:10
-    @time for x in eachcol(X)
-        tree(x)
-    end
-end
-
-@show point_in_polygon(tree, [-2.0, 2.0])
-@show point_in_polygon(tree, [0.3, 0.2])
-
-stl = Stereolitography(
-    [
-        -1.0 0.0 0.0 1.0 1.0 (-1.0);
-        0.0 0.0 0.5 0.5 1.0 1.0
-    ];
-    closed = true
-)
-tree = STLTree(stl)
-analytic_isin = p -> let (x, y) = p
-    if x < -1.0
-        return false
-    end
-
-    if x > 1.0
-        return false
-    end
-
-    if x <= 0.0
-        if y > 0.0 && y < 1.0
-            return true
-        else
-            return false
-        end
-    else
-        if y > 0.5 && y < 1.0
-            return true
-        else
-            return false
-        end
-    end
-end
-
-for x in (rand(2, 20) .- 0.5) .* 4 |> eachcol
-    @show x
-    @show point_in_polygon(tree, x)
-    @show analytic_isin(x)
-end
-
-stl = Stereolitography(
-    [
-        0.0 1.0 1.0 0.0;
-        0.0 0.0 1.0 0.125;
-        0.0 0.0 0.0 0.0
-    ],
-    [
-        1 2 3;
-        3 4 1
-    ] |> permutedims
-)
-
-stl = refine_to_length(stl, 0.25)
-
-vtk = stl2vtk("test", stl)
-STLHandler.vtk_save(vtk)
-=#
