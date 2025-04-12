@@ -91,17 +91,6 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Obtain interpolator from source to destination mesh
-    """
-    Interpolator(
-        src::Mesher.Mesh, dst::Mesher.Mesh
-    ) = Interpolator(
-        src, dst.centers, src.tree
-    )
-
-    """
-    $TYPEDSIGNATURES
-
     Evaluate interpolator
     """
     function (intp::Interpolator)(Q::AbstractVector)
@@ -700,6 +689,37 @@ module ImmersedBoundary
     μ(u::AbstractArray, domain::Domain, dim::Int64) = (
         getalong(u, domain, dim, 1) .+ u
     ) ./ 2
+
+    """
+    $TYPEDSIGNATURES
+
+    Run iteration of laplacian smoothing (obtain average of neighbors)
+    """
+    function smooth(u::AbstractArray, domain::Domain)
+        uavg = similar(u)
+        uavg .= 0.0
+
+        cnt = 0
+        for i = 1:size(domain.mesh.centers, 1)
+            cnt += 2
+            uavg .+= (
+                getalong(u, domain, i, -1) .+ getalong(u, domain, i, 1)
+            )
+        end
+
+        uavg ./ cnt
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain interpolator from source to destination domains
+    """
+    Interpolator(
+        src::Domain, dst::Domain
+    ) = Interpolator(
+        src.mesh, dst.mesh.centers, src.tree
+    )
 
     include("cfd.jl")
     using .CFD

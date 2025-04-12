@@ -24,13 +24,18 @@ dmn = ibm.Domain(msh)
 
 x, y = eachrow(msh.centers)
 
-u = y .+ x .* 2
+u = y .+ x .^ 2
+uavg = copy(u)
+for i = 1:4
+    uavg .= ibm.smooth(uavg, dmn)
+end
 
-ux = ibm.∇(u, dmn, 1)
-uy = ibm.∇(u, dmn, 2)
-
-vtk = mshr.vtk_grid("n0012", msh; ux = ux, uy = uy)
+vtk = mshr.vtk_grid("n0012", msh; uavg = uavg, u = u)
 mshr.vtk_save(vtk)
 
-vtk = mshr.vtk_grid("n0012_coarse", meshes[end])
+dmn_coarse = ibm.Domain(meshes[end])
+intp = ibm.Interpolator(dmn, dmn_coarse)
+u = intp(u)
+
+vtk = mshr.vtk_grid("n0012_coarse", meshes[end]; u = u)
 mshr.vtk_save(vtk)
