@@ -206,6 +206,8 @@ module ImmersedBoundary
         tree::Union{Nothing, KDTree}
         stencil_interpolators::Dict{Tuple, Interpolator}
         boundaries::Dict{String, Boundary}
+        centers::AbstractMatrix{Float64}
+        widths::AbstractMatrix{Float64}
     end
 
     """
@@ -236,7 +238,8 @@ module ImmersedBoundary
                         image_distance_ratio = image_distance_ratio
                     ) for bname in keys(msh.boundary_in_domain)
                 ]...
-            )
+            ),
+            copy(msh.centers), copy(msh.widths)
         )
     end
 
@@ -249,7 +252,7 @@ module ImmersedBoundary
 
     ```
     dx, dy = eachrow(
-        domain.mesh.widths
+        domain.widths
     )
 
     du!dy = (
@@ -573,7 +576,7 @@ module ImmersedBoundary
     """
     function getalong(v::AbstractArray, domain::Domain, dim::Int64, offset::Int64)
 
-        inds = zeros(Int64, size(domain.mesh.centers, 1))
+        inds = zeros(Int64, size(domain.centers, 1))
         inds[dim] = offset
 
         domain(v, inds...)
@@ -658,7 +661,7 @@ module ImmersedBoundary
     Obtain a backward derivative along dimension `dim`.
     """
     ∇(u::AbstractArray, domain::Domain, dim::Int64) = let uim1 = getalong(u, domain, dim, -1)
-        (u .- uim1) ./ _reshape_tolast(u, view(domain.mesh.widths, dim, :))
+        (u .- uim1) ./ _reshape_tolast(u, view(domain.widths, dim, :))
     end
 
     """
@@ -667,7 +670,7 @@ module ImmersedBoundary
     Obtain a forward derivative along dimension `dim`.
     """
     Δ(u::AbstractArray, domain::Domain, dim::Int64) = let uip1 = getalong(u, domain, dim, 1)
-        (uip1 .- u) ./ _reshape_tolast(u, view(domain.mesh.widths, dim, :))
+        (uip1 .- u) ./ _reshape_tolast(u, view(domain.widths, dim, :))
     end
 
     """
@@ -677,7 +680,7 @@ module ImmersedBoundary
     """
     δ(u::AbstractArray, domain::Domain, dim::Int64) = let uip1 = getalong(u, domain, dim, 1)
         (uip1 .- getalong(u, domain, dim, -1)) ./ (
-            2 .* _reshape_tolast(u, view(domain.mesh.widths, dim, :))
+            2 .* _reshape_tolast(u, view(domain.widths, dim, :))
         )
     end
 
@@ -700,7 +703,7 @@ module ImmersedBoundary
         uavg .= 0.0
 
         cnt = 0
-        for i = 1:size(domain.mesh.centers, 1)
+        for i = 1:size(domain.centers, 1)
             cnt += 2
             uavg .+= (
                 getalong(u, domain, i, -1) .+ getalong(u, domain, i, 1)

@@ -22,7 +22,7 @@ meshes = mshr.Multigrid(
 msh = meshes[1]
 dmn = ibm.Domain(msh)
 
-x, y = eachrow(msh.centers)
+x, y = eachrow(dmn.centers)
 
 u = y .+ x .^ 2
 uavg = copy(u)
