@@ -13,8 +13,6 @@ Pkg.add("https://github.com/pedrosecchi67/ImmersedBoundary.jl.git")
 
 Basic usage instructions are included below. **Please refer to the docstrings of each function for additional arguments and definitions**.
 
-The example `test/cuda_rae2822.jl` shows the use of this library to obtain a GPU-parallel, 2D Euler solver for the compressible flow around an airfoil.
-
 For a more in-depth technical explanation of the package, please refer to docs/theory.pdf.
 
 ### Stereolitography objects
@@ -23,11 +21,12 @@ Solid boundaries are described by Stereolitography input:
 
 ```julia
 import ImmersedBoundary as ibm
+import ImmersedBoundary.Mesher as mshr
 
-sphere = ibm.Stereolitography("sphere.stl")
+sphere = mshr.Stereolitography("sphere.stl")
 
 # Selig format .dat file with no header:
-airfoil = ibm.Stereolitography("rae2822.dat")
+airfoil = mshr.Stereolitography("rae2822.dat")
 
 circle = let theta = LinRange(0.0, 2pi, 100) |> collect
     points = [
@@ -35,7 +34,7 @@ circle = let theta = LinRange(0.0, 2pi, 100) |> collect
         sin.(theta)'
     ]
 
-    Stereolitography(points; closed = true)
+    mshr.Stereolitography(points; closed = true)
 end
 
 circle = let theta = LinRange(0.0, 2pi, 100) |> collect
@@ -48,7 +47,7 @@ circle = let theta = LinRange(0.0, 2pi, 100) |> collect
         circshift(collect(1:length(theta)), -1)'
     ]
 
-    Stereolitography(points, indices)
+    mshr.Stereolitography(points, indices)
 end
 
 # concatenate two STLs:
@@ -57,93 +56,111 @@ stl = cat(circle, airfoil)
 
 ### Mesh generation
 
-Octree mesh generation can be done with:
+Fixed octree mesh generation can be done with:
 
 ```julia
-mesh = ibm.Mesh(
-    [-10.0,-10.0], [20.0,20.0], # hypercube origin, widths
-    sphere => 0.01, # STL surface - max. size pair
-    sphere2 => 0.005;
-    clipping_surface = cat(sphere, sphere2), # clip domain at surf.
-    interior_point = [5.0, 0.0], # interior point reference for domain
-    n_recursive_split = 5, # number of recursive splits after boundary refinement
-    refinement_regions = [
-        ibm.Ball([0.0, 0.0], 0.1) => 0.005,
-        ibm.Box([0.0, 0.0], [0.5, 0.5]) => 0.005,
-        ibm.Line([0.0, 1.0], [1.0, 0.0]) => 0.005
-    ] # pairs between distance functions and local max. sizes
-)
-
-# save to file:
-vtk = ibm.vtk_grid("mesh", msh; u = rand(length(msh))) # (kwargs as cell data)
-ibm.vtk_save(vtk)
-
-# mesh size:
-@info "$(ndims(msh))-dimensional mesh of size $(length(msh))"
+    function FixedMesh(
+            origin::Vector{Float64}, widths::Vector{Float64},
+            surfaces::Tuple{String, Stereolitography, Float64}...;
+            refinement_regions::AbstractVector = [],
+            growth_ratio::Float64 = 1.2,
+            max_length::Float64 = Inf,
+            ghost_layer_ratio::Float64 = -2.2,
+            interior_point = nothing,
+            approximation_ratio::Float64 = 2.0,
+            filter_triangles_every::Int64 = 0,
+            verbose::Bool = false,
+            farfield_boundaries = nothing,
+    )
 ```
 
-### Boundary definition
-
-To define a boundary from stereolitography objects, one may use:
+* A hypercube origin;
+* A vector of hypercube widths;
+* A set of tuples in format `(name, surface, max_length)` describing
+    stereolitography surfaces (`Mesher.Stereolitography`) and 
+    the max. cell widths at these surfaces;
+* A set of refinement regions described by distance functions and
+    the local refinement at each region. Example:
 
 ```julia
-bdry = ibm.Boundary(msh, stl1, stl2)
+refinement_regions = [
+    Mesher.Ball([0.0, 0.0], 0.1) => 0.005,
+    Mesher.Ball([1.0, 0.0], 0.1) => 0.005,
+    Mesher.Box([-1.0, -1.0], [3.0, 2.0]) => 0.0025,
+    Mesher.Line([1.0, 0.0], [2.0, 0.0]) => 0.005
+]
 ```
 
-Or, similarly, for hypercube boundaries:
+* A cell growth ratio;
+* A maximum cell size (optional);
+* A ratio between the cell circumradius and the SDF threshold past which
+    cells are considered to be out of the domain. `ghost_layer_ratio = -2.0` 
+    guarantees that a layer of at least two ghost cell layers are included 
+    within each solid;
+* A point reference within the domain. If absent, external flow is assumed;
+* An approximation ratio between wall distance and cell circumradius past which
+    distance functions are approximated;
+* A number of recursive refinement levels past which the triangles in the provided
+    triangulations are filtered to lighter, local topologies.
+
+Farfield boundaries may be defined with the following syntax:
 
 ```julia
-inlet = Boundary(
-    msh,
-    (1, false), # "back" face, first (x) axis
-    (2, false), # "bottom" face, second (y) axis
-    (2, true), # "top" face, second (y) axis
-    (3, false), # ...
-    (3, true)
-)
+farfield_boundaries = [
+    "inlet" => [
+        (1, false), # fwd face, first dimension (x)
+        (2, false), # left face, second dimension (y)
+        (2, true), # right face, second dimension (y)
+        (3, false), # bottom face, third dimension (z)
+        (3, true), # top face, third dimension (z)
+    ],
+    "outlet" => [(1, true)]
+]
 ```
+
+### Domain definition
+
+To define a PDE domain from a mesh, you can simply use:
+
+```julia
+domain = ibm.Domain(msh)
+```
+
+Check out the docstring for tunable hyperparameters regarding ghost points.
 
 ### Residual evaluation
 
 To evaluate residuals, one may use stencil points and cell spacing information for the mesh.
 
-For example, with a vector of cell properties $u$, one may find $\partial u/\partial x$ using central differences:
+For example, with a vector of cell properties $u$, one may find $\partial u/\partial y$ using central differences:
 
 ```julia
-u = rand(length(msh))
+dx, dy = eachrow(
+    domain.widths
+)
 
-dx, dy = msh.spacing
-
-ux = (
-    msh(u, 1, 0) .- msh(u, -1, 0)
-) ./ (2 .* dx)
-
-# similarly:
-uy = (
-    getalong(u, msh, 2, 1) .- # vector, mesh, dimension, offset
-    getalong(u, msh, 2, -1)
+du!dy = (
+    domain(u, 0, 1) .- domain(u, 0, -1)
 ) ./ (2 .* dy)
 ```
 
-These functions also work for multidimensional tensors, so long as the last dimension indicates the cell index.
+These functions also work for multidimensional arrays, so long as the last dimension indicates the cell index.
 
 ### Boundary condition imposition
 
 To impose (in-place) the non-penetration condition for a velocity field at boundary `bdry`, one may use:
 
 ```julia
-bc = ibm.BoundaryCondition() do bdry, u, v # field variables interpolated to image points before imposition
-    nx, ny = bdry.normals
+impose_bc!(domain, "wall", u, v) do bdry, ui, vi # boundary struct and values at image points
+    nx, ny = eachrow(bdry.normals)
 
-    unormal = @. nx * u + ny * v
+    un = @. ui * nx + vi * ny
 
-    ( # note that fewer return values than input field variables may be specified, if needed
-        u .- nx .* unormal,
-        v .- ny .* unormal
+    (
+        ui .- un .* nx,
+        vi .- un .* ny
     )
 end
-
-ibm.impose_bc!(bc, bdry, u, v)
 ```
 
 Check `?ibm.Boundary` and `?ibm.impose_bc!` for further information.
@@ -156,28 +173,30 @@ To create a surface, one may use:
 
 ```julia
 surf = ibm.Surface(
-    msh, stl;
-    linear = true # use linear interpolation
+    domain, stl
 )
 
 # to refine via tri splitting to reach a given maximum surface element length:
 surf = ibm.Surface(
-    msh, stl, max_length
+    domain, stl, max_length
 )
+
+# to use a stereolitography object previously employed for boundary definition:
+surf = ibm.Surface(domain, "wall")
 ```
 
 One may interpolate fluid properties to a surface and use them for integration:
 
 ```julia
 # "velocity" vector in 2D mesh:
-uv = rand(2, length(msh))
+uv = rand(2, length(domain.mesh))
 
 uv_surf = surf(uv)
 Cp = let (u, v) = eachrow(uv_surf)
     @. 1.0 - u ^ 2 - v ^ 2
 end
 
-nx, ny = surf.normals # check docstring for other properties
+nx, ny = surf.normals |> eachrow # check docstring for other properties
 
 CX = ibm.surface_integral(surf, - nx .* Cp)
 CY = ibm.surface_integral(surf, - ny .* Cp)
@@ -192,58 +211,47 @@ ibm.vtk_save(vtk)
 
 ### Multigrid
 
-Geometric multigrid coarsening may be defined with:
+To generate a series of meshes with element size ratios of 2 near the boundary:
 
 ```julia
-mgrid = ibm.Multigrid(msh)
-
-# for max. block size 2 ^ (ndims(msh) * 4):
-mgrid = ibm.Multigrid(msh, 4)
-
-Q = rand(4, length(msh))
-
-Qcoarse = mgrid(Q)
-
-# ratio between coarse and fine cell sizes:
-@show mgrid.size_ratios
+m1, m2, m3 = mshr.Multigrid( # from finest to coarsest
+    3, # 3 levels
+    [-L/2,-L/2], [L,L],
+    ("wall", stl, 0.001);
+    verbose = true,
+    farfield_boundaries = [
+        "farfield" => [(1, false), (1, true), (2, false), (2, true)]
+    ],
+    refinement_regions = [
+        mshr.Ball([0.0, 0.0], 0.01) => 0.00025,
+        mshr.Ball([1.0, 0.0], 0.01) => 0.00025,
+    ]
+)
 ```
 
-Check the docstrings for further info.
+To interpolate flow properties between domains:
+
+```julia
+dmn1 = ibm.Domain(m1)
+dmn2 = ibm.Domain(m2)
+
+intp = ibm.Interpolator(dmn1, dmn2)
+
+Q1 = rand(length(dmn1.mesh))
+Q2 = intp(Q1)
+```
 
 ### GPU/CPU parallelization
 
 Function `to_backend` may be used to convert all arrays to a custom backend, such as that of CUDA.jl:
 
 ```julia
-##################################################
-# port everything to GPU
+dmn = ibm.to_backend(dmn, CuArray) # domains
+surf = ibm.to_backend(surf, CuArray) # surfaces
+intp = ibm.to_backend(intp, CuArray) # interpolators
 
-# Mesh:
-msh = ibm.to_backend(CuArray, msh)
-# Multigrid:
-mgrid_levels = map(mgrid -> ibm.to_backend(CuArray, mgrid), mgrid_levels)
-# Boundaries:
-wall = ibm.to_backend(CuArray, wall)
-freestream = ibm.to_backend(CuArray, freestream)
-
-# State variables:
-Q = CuArray(Q)
-
-##################################################
-
-# Run calcs.
-
-##################################################
-# port everything to CPU
-
-msh = ibm.to_backend(Array, msh)
-mgrid_levels = map(mgrid -> ibm.to_backend(Array, mgrid), mgrid_levels)
-wall = ibm.to_backend(Array, wall)
-freestream = ibm.to_backend(Array, freestream)
-
-Q = Array(Q)
-
-##################################################
+# ...and back:
+dmn = ibm.to_backend(dmn, Array)
 ```
 
 ### CFD utilities

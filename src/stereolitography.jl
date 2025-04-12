@@ -567,7 +567,7 @@ module STLHandler
 
         p0 = simplex[:, 1]
 
-        nϵ = sqrt(eps(eltype(p0)))
+        nϵ = (eps(eltype(p0)))
 
         dp = (p2 .- p1)
 
@@ -641,7 +641,8 @@ module STLHandler
         p1::AbstractVector{Float64}, p2::AbstractVector{Float64}
     )
 
-        ϵ = eltype(p1) |> eps |> sqrt
+        ϵ = eltype(p1) |> eps
+        sqϵ = sqrt(ϵ)
 
         box_lb = copy(box.origin)
         box_ub = @. box.origin + box.widths
@@ -667,8 +668,8 @@ module STLHandler
                 all,
                 eachcol(
                         @. (
-                            intersection_points >= box_lb - box.widths * 0.001 && 
-                            intersection_points <= box_ub + box.widths * 0.001
+                            intersection_points >= box_lb - box.widths * 0.001 - sqϵ && 
+                            intersection_points <= box_ub + box.widths * 0.001 + sqϵ
                         )
                 )
         )

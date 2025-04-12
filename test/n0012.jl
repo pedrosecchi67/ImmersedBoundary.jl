@@ -1,207 +1,41 @@
+import ImmersedBoundary.Mesher as mshr
 import ImmersedBoundary as ibm
 
-stl = ibm.Stereolitography("n0012.dat")
+stl = mshr.Stereolitography("n0012.dat")
 
 L = 20.0
 
-msh = ibm.Mesh(
-               [-L/2,-L/2], [L,L],
-               stl => 0.0025;
-               refinement_regions = [
-                    ibm.Ball([0.0, 0.0], 0.05) => 0.001,
-                    ibm.Ball([1.0, 0.0], 0.05) => 0.001,
-                ],
-                clipping_surface = stl,
+meshes = mshr.Multigrid(
+    5, 
+    [-L/2,-L/2], [L,L],
+    ("wall", stl, 0.001);
+    verbose = true,
+    farfield_boundaries = [
+        "farfield" => [(1, false), (1, true), (2, false), (2, true)]
+    ],
+    refinement_regions = [
+        mshr.Ball([0.0, 0.0], 0.01) => 0.00025,
+        mshr.Ball([1.0, 0.0], 0.01) => 0.00025,
+    ]
 )
 
-mgrid_levels = [
-        ibm.Multigrid(msh, 1),
-        ibm.Multigrid(msh, 2),
-        ibm.Multigrid(msh, 3),
-        ibm.Multigrid(msh),
-]
+msh = meshes[1]
+dmn = ibm.Domain(msh)
 
-wall = ibm.Boundary(msh, stl)
-freestream = ibm.Boundary(msh, (1, false), (1, true), (2, false), (2, true))
-wall_surface = ibm.Surface(msh, stl, 0.005)
+x, y = eachrow(dmn.centers)
 
-fluid = ibm.CFD.Fluid(; R = 283.0, γ = 1.4)
-
-α = 5.0
-M∞ = 0.5
-T∞ = 288.15
-p∞ = 1.0e5
-
-a∞ = ibm.CFD.speed_of_sound(fluid, T∞)
-u∞ = a∞ * M∞ * cosd(α)
-v∞ = a∞ * M∞ * sind(α)
-
-ρ, E, ρu, ρv = ibm.CFD.primitive2state(fluid, p∞, T∞, u∞, v∞)
-ρ = fill(ρ, length(msh))
-E = fill(E, length(msh))
-ρu = fill(ρu, length(msh))
-ρv = fill(ρv, length(msh))
-
-Q = [ρ'; E'; ρu'; ρv']
-
-@info "$(length(msh)) cells"
-
-qdot = q -> begin
-    E = ibm.CFD.HLL(ibm.MUSCL(q, msh, 1)..., 1, fluid)
-    F = ibm.CFD.HLL(ibm.MUSCL(q, msh, 2)..., 2, fluid)
-
-    - (ibm.∇(E, msh, 1) .+ ibm.∇(F, msh, 2))
-end
-timescale = (
-            q;
-            CFL::Float64 = 0.5,
-            CFL_local::Float64 = 0.5,
-)-> let (_, T, u, v) = ibm.CFD.state2primitive(fluid, eachrow(q)...)
-    dx, dy = msh.spacing
-    a = ibm.CFD.speed_of_sound(fluid, T)
-
-    dt = @. min(
-        dx / (a + abs(u)),
-        dy / (a + abs(v)),
-    ) / 2
-
-    dtmin = minimum(dt)
-
-    @. min(dtmin * CFL, dt * CFL_local)
+u = y .+ x .^ 2
+uavg = copy(u)
+for i = 1:4
+    uavg .= ibm.smooth(uavg, dmn)
 end
 
-choose_if(mask, iftrue, iffalse) = @. mask * iftrue + (1 - mask) * iffalse 
+vtk = mshr.vtk_grid("n0012", msh; uavg = uavg, u = u)
+mshr.vtk_save(vtk)
 
-wall_bc = ibm.BoundaryCondition() do bdry, ρ, E, ρu, ρv
-    nx, ny = bdry.normals
+dmn_coarse = ibm.Domain(meshes[end])
+intp = ibm.Interpolator(dmn, dmn_coarse)
+u = intp(u)
 
-    p, T, u, v = ibm.CFD.state2primitive(fluid, ρ, E, ρu, ρv)
-
-    unorm = @. nx * u + ny * v
-
-    ibm.CFD.primitive2state(
-        fluid,
-        p, T,
-        u .- unorm .* nx,
-        v .- unorm .* ny,
-    )
-end
-freestream_bc = ibm.BoundaryCondition() do bdry, ρ, E, ρu, ρv
-    nx, ny = bdry.normals
-
-    p, T, u, v = ibm.CFD.state2primitive(fluid, ρ, E, ρu, ρv)
-    a = ibm.CFD.speed_of_sound(fluid, T)
-
-    M = @. (u * nx + v * ny) / a
-
-    is_inlet = @. M > 0.0
-    subsonic = @. M < 1.0
-
-    p = choose_if(is_inlet, choose_if(subsonic, p, p∞), choose_if(subsonic, p∞, p))
-    T = choose_if(is_inlet, T∞, T)
-    u = choose_if(is_inlet, u∞, u)
-    v = choose_if(is_inlet, v∞, v)
-
-    ibm.CFD.primitive2state(fluid, p, T, u, v)
-end
-impose_bcs! = q -> begin
-    ibm.impose_bc!(wall_bc, wall, eachrow(q)...)
-    ibm.impose_bc!(freestream_bc, freestream, eachrow(q)...)
-end
-march! = (q; CFL = 100.0, CFL_local = 1.0, mgrid_level = 0) -> begin
-    mgrid = nothing
-    if mgrid_level > 0
-        CFL = CFL_local
-        mgrid = mgrid_levels[mgrid_level]
-    end
-
-    dt = timescale(q; CFL = CFL, CFL_local = CFL_local)
-
-    # first stage of Heun's method
-    dq = let _q = qdot(q) .* dt' .+ q
-        impose_bcs!(_q)
-        _q .- q
-    end
-    if mgrid_level > 0
-        dq .= mgrid(dq) .* mgrid.size_ratios'
-    end
-    qright = q .+ dq
-
-    # second stage of Heun's method
-    dq = let _q = qdot(qright) .* dt' .+ q
-        impose_bcs!(_q)
-        _q .- q
-    end
-    if mgrid_level > 0
-        dq .= mgrid(dq) .* mgrid.size_ratios'
-    end
-    qnew = (q .+ dq .+ qright) ./ 2
-
-    dq = qnew .- q
-
-    q .= qnew
-
-    ibm.CFD.rms(dq)
-end
-
-coeffs = q -> let _q = wall_surface(q)
-    p, _, _, _ = ibm.CFD.state2primitive(fluid, eachrow(_q)...)
-
-    Cp = ibm.CFD.pressure_coefficient(fluid, p, p∞, M∞)
-
-    nx, ny = wall_surface.normals
-
-    CX = - ibm.surface_integral(wall_surface, Cp .* nx)
-    CY = - ibm.surface_integral(wall_surface, Cp .* ny)
-
-    CD = CX * cosd(α) + CY * sind(α)
-    CL = - CX * sind(α) + CY * cosd(α)
-
-    (CL = CL, CD = CD)
-end
-
-let Qavg = ibm.CFD.TimeAverage(300.0)
-    for nit = 1:10000
-        @time begin
-            if nit < 1500
-                for level = 1:length(mgrid_levels)
-                    march!(Q; mgrid_level = level)
-                    march!(Q)
-                end
-            end
-            resd = march!(Q)
-
-            push!(Qavg, Q)
-
-            @show nit, resd
-        end
-
-        if nit % 10 == 0
-            @show coeffs(Qavg.μ)
-        end
-    end
-
-    Q .= Qavg.μ
-end
-
-dt = timescale(Q)
-ρ, E, ρu, ρv = eachrow(Q)
-
-p, T, u, v = ibm.CFD.state2primitive(fluid, ρ, E, ρu, ρv)
-a = ibm.CFD.speed_of_sound(fluid, T)
-
-Cp = ibm.CFD.pressure_coefficient(fluid, p, p∞, M∞)
-Mach = @. sqrt(u ^ 2 + v ^ 2) / a
-
-vtk = ibm.vtk_grid("n0012", msh;
-                p = p, T = T, u = u, v = v,
-                ρ = ρ, Mach = Mach, Cp = Cp,
-               dt = dt, 
-               distance = wall.distance_field)
-ibm.vtk_save(vtk)
-
-vtk = ibm.surf2vtk("surface_n0012", wall_surface;
-                p = p, T = T, u = u, v = v,
-                ρ = ρ, Mach = Mach, Cp = Cp, distance = wall.distance_field)
-ibm.vtk_save(vtk)
-
+vtk = mshr.vtk_grid("n0012_coarse", meshes[end]; u = u)
+mshr.vtk_save(vtk)
