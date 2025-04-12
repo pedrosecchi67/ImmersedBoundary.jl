@@ -421,6 +421,7 @@ module Mesher
                 depth::Int64,
                 approximation_ratio::Float64,
                 filter_triangles_every::Int64,
+                _mgrid_depth::Int64,
         )
                 center = c.origin .+ c.widths ./ 2
 
@@ -439,7 +440,7 @@ module Mesher
                 )
 
                 L = maximum(c.widths)
-                Lmax = minimum((@. max(abs(ds) * (growth_ratio - 1.0), local_lengths)))
+                Lmax = minimum((@. max(abs(ds) * (growth_ratio - 1.0), local_lengths * (2 ^ _mgrid_depth))))
 
                 if length(refinement_regions) > 0
                     ds_refinement = map(
@@ -448,7 +449,7 @@ module Mesher
 
                     Lmax = min(
                         Lmax,
-                        minimum((@. max(ds_refinement * (growth_ratio - 1.0), refinement_lengths))),
+                        minimum((@. max(ds_refinement * (growth_ratio - 1.0), refinement_lengths * (2 ^ _mgrid_depth)))),
                     )
                 end
 
@@ -491,6 +492,7 @@ module Mesher
                                 depth + 1,
                                 approximation_ratio,
                                 filter_triangles_every,
+                                _mgrid_depth,
                         )
                     end,
                     Iterators.product(
@@ -572,6 +574,7 @@ module Mesher
                 filter_triangles_every::Int64 = 0,
                 verbose::Bool = false,
                 farfield_boundaries = nothing,
+                _mgrid_depth::Int64 = 0
         )
             bnames = map(p -> p[1], surfaces) |> collect
             bdries = map(p -> p[2], surfaces) |> collect
@@ -612,6 +615,7 @@ module Mesher
                                     1,
                                     approximation_ratio,
                                     filter_triangles_every,
+                                    _mgrid_depth,
                 )
             ]
 
@@ -698,6 +702,27 @@ module Mesher
                 )
             )
         end
+
+        """
+        $TYPEDSIGNATURES
+
+        Obtain multiple meshes for a multigrid approach, returned from finest to coarsest.
+        The element size ratio between meshes is 2.
+
+        All arguments and kwargs are passed to `FixedMesh`.
+        """
+        Multigrid(ngrids::Int64, args...; 
+            verbose::Bool = false, kwargs...) = map(
+            level -> begin
+                if verbose
+                    println("====Mesh level $level====")
+                end
+
+                FixedMesh(args...; kwargs..., 
+                    _mgrid_depth = level - 1, verbose = verbose)
+            end,
+            1:ngrids
+        )
 
         """
         $TYPEDSIGNATURES

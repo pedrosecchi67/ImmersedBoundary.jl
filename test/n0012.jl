@@ -5,7 +5,8 @@ stl = mshr.Stereolitography("n0012.dat")
 
 L = 20.0
 
-msh = mshr.FixedMesh(
+meshes = mshr.Multigrid(
+    5, 
     [-L/2,-L/2], [L,L],
     ("wall", stl, 0.001);
     verbose = true,
@@ -18,6 +19,7 @@ msh = mshr.FixedMesh(
     ]
 )
 
+msh = meshes[1]
 dmn = ibm.Domain(msh)
 
 x, y = eachrow(msh.centers)
@@ -28,4 +30,7 @@ ux = ibm.∇(u, dmn, 1)
 uy = ibm.∇(u, dmn, 2)
 
 vtk = mshr.vtk_grid("n0012", msh; ux = ux, uy = uy)
+mshr.vtk_save(vtk)
+
+vtk = mshr.vtk_grid("n0012_coarse", meshes[end])
 mshr.vtk_save(vtk)
