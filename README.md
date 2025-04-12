@@ -132,6 +132,7 @@ u = rand(length(msh))
 v = rand(2, length(msh)) 
 
 vtk = mshr.mesh2vtk("results", msh; u = u, v = v)
+mshr.vtk_save(vtk)
 ```
 
 Arrays can be passed as kwargs to record cell data. The last dimension is assumed to refer to the cell index.
