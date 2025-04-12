@@ -1,346 +1,138 @@
 module ImmersedBoundary
 
-    # includes stereolitography, linearalgebra, docstringextensions
-    include("tree.jl")
+    include("mesher.jl")
+    using .Mesher
+
+    using .Mesher.DocStringExtensions
+    using .Mesher.LinearAlgebra
+
+    using NearestNeighbors
 
     """
     $TYPEDFIELDS
 
-    Struct to define a mesh stencil point
+    Struct to hold an interpolator from mesh points
     """
-    struct StencilPoint
-        interpolator::Interpolator
+    struct Interpolator
+        n_outputs::Int64
+        fetch_to::AbstractVector{Int64}
         fetch_from::AbstractVector{Int64}
+        interpolate_to::AbstractVector{Int64}
+        stencils::AbstractMatrix{Int64}
+        weights::AbstractMatrix{Float64}
     end
 
     """
     $TYPEDSIGNATURES
 
-    Constructor for a stencil point
+    Obtain interpolator based on a KDTree and matrix of evaluation points
     """
-    function StencilPoint(
-        tree::TreeCell,
-        indices::Int...
-    )
+    function Interpolator(msh::Mesher.Mesh, X::AbstractMatrix, 
+        tree::Union{KDTree, Nothing} = nothing)
 
-        indices = collect(indices)
-
-        lvs = leaves(tree)
-        centers = map(l -> l.center, lvs) |> x -> reduce(hcat, x)
-        widths = map(l -> l.widths, lvs) |> x -> reduce(hcat, x)
-
-        X = centers .+ widths .* indices
-
-        fetch_from = zeros(Int64, length(lvs))
-        interp_mask = falses(length(lvs))
-
-        for (i, x) in enumerate(eachcol(X))
-            c = find_leaf(tree, x)
-
-            if isnothing(c)
-                interp_mask[i] = true
-            else
-                if !(c.center ≈ x)
-                    interp_mask[i] = true
-                else
-                    fetch_from[i] = c.index
-                end
-            end
+        if isnothing(tree)
+            tree = KDTree(msh.centers)
         end
 
-        fetch_mask = (@. !interp_mask)
+        n_outputs = size(X, 2)
+        nd = size(X, 1)
 
-        fetch_from[interp_mask] .= - (1:sum(interp_mask))
-        X = X[:, interp_mask]
+        kneighs = 2 ^ nd
+        stencils, dists = knn(tree, X, kneighs)
+        stencils = reduce(hcat, stencils)
+        dists = reduce(hcat, dists)
 
-        intp = LinearInterpolator(tree, X)
+        weights = similar(dists)
 
-        StencilPoint(intp, fetch_from)
+        for (j, x) in enumerate(eachcol(X))
+            ds = @view dists[:, j]
+            inds = @view stencils[:, j]
+            cnts = @view msh.centers[:, inds]
 
-    end
+            w = let ϵ = eps(eltype(ds))
+                w = @. 1.0 / (ds + ϵ)
+            end
 
-    """
-    $TYPEDSIGNATURES
+            A = mapreduce(
+                c -> [1.0 (c .- x)'],
+                vcat,
+                eachcol(cnts)
+            ) .* w
 
-    Obtain values at a stencil point.
-    """
-    (stencil::StencilPoint)(v::AbstractVector) = let iv = stencil.interpolator(v)
-        map(
-            f -> (
-                f < 0 ?
-                iv[- f] :
-                v[f]
-            ),
-            stencil.fetch_from
+            weights[:, j] .= pinv(A)[1, :] .* w
+        end
+
+        threshold = sqrt(eps(eltype(dists)))
+        is_same_point = @. abs(weights - 1.0) < threshold
+        # find if all other weigths are zero
+        let is_near_zero = map(
+            c -> sum(abs.(c) .< threshold) == kneighs - 1,
+            eachcol(weights)
         )
-    end
+            is_same_point .*= is_near_zero'
+        end
 
-    """
-    $TYPEDSIGNATURES
+        should_fetch = map(any, eachcol(is_same_point))
+        fetch_to = findall(should_fetch)
+        fetch_from = vec(stencils)[vec(is_same_point)]
+        @assert length(fetch_to) == length(fetch_from) "Coinciding mesh centers?"
 
-    Obtain values at a stencil point. The last index indicates the mesh point.
-    """
-    (stencil::StencilPoint)(v::AbstractArray) = mapslices(
-        vv -> stencil(vv), v; dims = ndims(v)
-    )
+        interpolate_to = findall(
+            (@. !should_fetch)
+        )
 
-    _to_backend(converter, stencil::StencilPoint) = StencilPoint(
         Interpolator(
-             converter(stencil.interpolator.stencils),
-             converter(stencil.interpolator.weights),
-        ), converter(stencil.fetch_from)
-    )
-
-    """
-    $TYPEDFIELDS
-
-    Struct to describe a mesh
-    """
-    struct Mesh
-        tree::TreeCell
-        stencils::Dict{Tuple{Vararg{Int64}}, StencilPoint}
-        centers::Tuple{Vararg{AbstractArray{Float64}}}
-        spacing::Tuple{Vararg{AbstractArray{Float64}}}
-        interior_point::Vector{Float64}
-        ncells::Int64
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain mesh from a tree.
-    """
-    Mesh(
-        tree::TreeCell;
-        interior_point = nothing
-    ) = let stencils = Dict{Tuple{Vararg{Int64}}, StencilPoint}()
-        lvs = leaves(tree)
-
-        if isnothing(interior_point)
-            interior_point = tree.origin .- 0.1 .* tree.widths
-        end
-        
-        centers = map(
-            i -> map(
-                l -> l.center[i], lvs
-            ),
-            1:ndims(tree)
-        ) |> Tuple
-        spacing = map(
-            i -> map(
-                l -> l.widths[i], lvs
-            ),
-            1:ndims(tree)
-        ) |> Tuple
-
-        ncells = lvs |> length
-        
-        Mesh(
-            tree,
-            stencils,
-            centers, spacing,
-            interior_point,
-            ncells,
+            n_outputs,
+            fetch_to, fetch_from,
+            interpolate_to, stencils[:, interpolate_to], weights[:, interpolate_to]
         )
     end
 
     """
     $TYPEDSIGNATURES
 
-    Obtain mesh by refining a tree to surfaces and 
-    refinement regions.
-
-    Example:
-
-    ```
-    stl1 = ibm.Stereolitography("stl1")
-    stl2 = ibm.Stereolitography("stl2")
-
-    msh = ibm.Mesh(
-        [0.0, 0.0], [1.0, 1.0], # hypercube origin and widths
-        stl1 => 0.01, # surface => local length pair
-        stl2 => 0.01;
-        refinement_regions = [ # pairs between distance functions and local lengths.
-            ibm.Ball([0.0, 0.0], 0.1) => 0.05, # see ibm.Ball, ibm.Line, ibm.Box
-            ibm.Ball([1.0, 0.0], 0.1) => 0.05
-        ],
-        clipping_surface = cat(stl1, stl2), # surface to clip the interior of the domain.
-        interior_point = [0.0, 0.0] # reference point in the interior of the domain. Defaults to origin
-    )
-    ```
-    """
-    function Mesh(
-        origin::AbstractVector{Float64}, widths::AbstractVector{Float64},
-        surfaces::Pair{Stereolitography, Float64}...;
-        refinement_regions = [],
-        clipping_surface = nothing,
-        interior_point = nothing,
-        buffer_layer_depth::Int64 = 2,
-        intersection_detection_ratio::Float64 = 1.1,
-        cutting_ratio::Float64 = - 1.1,
-        split_size::Int64 = 2,
-        n_recursive_split::Int64 = 5,
-    )
-
-        tree = TreeCell(origin, widths; split_size = split_size)
-
-        if n_recursive_split > buffer_layer_depth
-            recursive_split!(tree, n_recursive_split - buffer_layer_depth)
-        end
-
-        refine!(
-            tree, surfaces...;
-            refinement_regions = refinement_regions,
-            buffer_layer_depth = buffer_layer_depth,
-            ratio = intersection_detection_ratio
-        )
-
-        set_numbering!(tree)
-        if !isnothing(clipping_surface)
-            clip_interior!(
-                tree,
-                clipping_surface;
-                interior = interior_point,
-                ratio = cutting_ratio,
-            )
-        end
-
-        Mesh(
-            tree; interior_point = interior_point,
-        )
-
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain number of dimensions in a mesh.
-    """
-    Base.ndims(msh) = ndims(msh.tree)
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain number of cells in a mesh
-    """
-    Base.length(msh::Mesh) = msh.ncells
-
-    """
-    $TYPEDSIGNATURES
-
-    Export volume mesh to VTK file.
-    Returns WriteVTK.jl object.
-
-    All kwargs are converted to cell data.
-
-    Example:
-
-    ```
-    vtk = ibm.vtk_grid("output", msh; u = rand(length(msh))) # exports output.vtu
-    ibm.vtk_save(vtk)
-    ```
-    """
-    WriteVTK.vtk_grid(fname, msh::Mesh; kwargs...) = octree2vtk(fname, msh.tree; kwargs...)
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain the values of a vector/array at a stencil point.
-    If a multi-dimensional array is passed, the last dimension
-    is expected to refer to the mesh cell.
-    """
-    function (msh::Mesh)(v::AbstractArray, indices::Int64...)
-
-        if !haskey(msh.stencils, indices)
-            st = StencilPoint(msh.tree, indices...)
-
-            bend = first(msh.centers) |> typeof |> x -> Base.typename(x).wrapper
-            if !(bend <: Array)
-                st = _to_backend(x -> bend(x), st)
-            end
-
-            msh.stencils[indices] = st
-        end
-
-        msh.stencils[indices](v)
-
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    ```
-    v = getalong(u, msh, 2, -1)
-    # ... is equivalent to:
-    v = u[msh, 0, -1, 0]
-    ```
-    """
-    function getalong(v::AbstractArray, msh::Mesh, dim::Int64, offset::Int64)
-
-        inds = zeros(Int64, ndims(msh))
-        inds[dim] = offset
-
-        msh(v, inds...)
-
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain an interpolator from a mesh and a set of points (matrix columns)
-    or to the face centers of a stereolitography object
+    Obtain interpolator from source to destination mesh
     """
     Interpolator(
-             msh::Mesh, X::Union{AbstractMatrix{Float64}, Stereolitography}
-    ) = Interpolator(msh.tree, X)
+        src::Mesher.Mesh, dst::Mesher.Mesh
+    ) = Interpolator(
+        src, dst.centers, src.tree
+    )
 
     """
     $TYPEDSIGNATURES
 
-    Obtain a linear interpolator from a mesh and a set of points (matrix columns)
-    or to the face centers of a stereolitography object
+    Evaluate interpolator
     """
-    LinearInterpolator(
-             msh::Mesh, X::Union{AbstractMatrix{Float64}, Stereolitography}
-    ) = LinearInterpolator(msh.tree, X)
+    function (intp::Interpolator)(Q::AbstractVector)
+        Qnew = Q[1:intp.n_outputs] # poor way of copying array type to given length
 
-    """
-    $TYPEDSIGNATURES
+        if length(intp.fetch_to) > 0
+            Qnew[intp.fetch_to] .= Q[intp.fetch_from]
+        end
 
-    Convert mesh to a given array operation backend.
-
-    Example:
-
-    ```
-    using CUDA
-    import ImmersedBoundary as ibm
-
-    msh = Mesh(#...
-
-    msh = ibm.to_backend(cu, msh)
-
-    # back to CPU:
-    msh = ibm.to_backend(Array, msh)
-    ```
-    """
-    function to_backend(converter, msh::Mesh)
-
-        tree = msh.tree
-        ncells = msh.ncells
-
-        stencils = Dict(
-            [
-                k => _to_backend(converter, v) for (k, v) in msh.stencils
-            ]...
-        )
-
-        Mesh(
-            tree, stencils, 
-            converter.(msh.centers), converter.(msh.spacing), msh.interior_point,
-            ncells,
-        )
-
+        if length(intp.interpolate_to) > 0
+            Qnew[intp.interpolate_to] .= dropdims(
+                sum(
+                    view(Q, intp.stencils) .* intp.weights;
+                    dims = 1
+                );
+                dims = 1
+            )
+        end
+        
+        Qnew
     end
+
+    """
+    $TYPEDSIGNATURES
+
+    Interpolate multi-dimensional array.
+    The last dimension is assumed to refer to the cell index.
+    """
+    (intp::Interpolator)(Q::AbstractArray) = mapslices(
+        intp, Q; dims = ndims(Q)
+    )
 
     """
     $TYPEDFIELDS
@@ -354,9 +146,9 @@ module ImmersedBoundary
         ghost_indices::AbstractVector{Int64}
         distances::AbstractVector{Float64}
         image_distances::AbstractVector{Float64}
-        normals::Tuple{Vararg{AbstractVector{Float64}}}
-        centers::Tuple{Vararg{AbstractVector{Float64}}}
-        projections::Tuple{Vararg{AbstractVector{Float64}}}
+        normals::AbstractMatrix{Float64}
+        centers::AbstractMatrix{Float64}
+        projections::AbstractMatrix{Float64}
         distance_field::AbstractVector{Float64}
         image_interpolator::Interpolator
     end
@@ -364,268 +156,226 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Obtain a boundary from a matrix of projections of each cell center upon the
-    boundary, with the row index indicating the spatial dimension.
-
-    Example:
-
-    ```
-    projections = rand(ndims(msh), length(msh)) # just to exemplify the shape
-
-    bdry = Boundary(msh, projections)
-    ```
-
-    `ratio` defines that any cell separated from a boundary by no more than
-    `ratio * norm(cell.widths) * sqrt(ndims(msh))` will be flagged as a ghost point.
-
-    `isin` may be a vector of booleans with `true` for in-domain cells.
+    Construct a boundary from a mesh, a boundary name, 
+    a ratio between the min. image point distance and the ghost cell
+    circumradius, and a range of distances/circumradii at which cells
+    are detected to be ghost points.
     """
     function Boundary(
-        msh::Mesh, projections::AbstractMatrix{Float64}, isin = nothing;
-        ratio::Real = 0.0,
+        msh::Mesher.Mesh, tree::KDTree, bname::String;
+        ghost_distance_ratio::Tuple{Float64, Float64} = (- Inf64, 1.0),
+        image_distance_ratio::Float64 = 1.0,
     )
-
-        if isnothing(isin)
-            isin = trues(size(projections, 2))
-        end
-
-        ϵ = sqrt(eps(eltype(projections)))
-
-        projections = eachrow(projections) |> Tuple
-
-        distance_field = map((c, p) -> (c .- p) .^ 2, msh.centers, projections) |> sum |> x -> sqrt.(x)
-        @. distance_field *= (2 * isin - 1)
-
-        characteristic_lengths = map(w -> w .^ 2, msh.spacing) |> sum |> x -> sqrt.(x)
-    
-        normals = map(
-            (c, p) -> (@. (c - p) / (distance_field + ϵ * sign(distance_field))),
-            msh.centers, projections,
+        projections = msh.boundary_projections[bname]
+        is_in_domain = msh.boundary_in_domain[bname]
+        sdf = map(
+            (p, c, i) -> norm(c .- p) * (2 * i - 1),
+            eachcol(projections), eachcol(msh.centers), is_in_domain
         )
 
-        nd = ndims(msh)
+        ρmin, ρmax = ghost_distance_ratio
+        image_distance_ratio = max(image_distance_ratio, ρmax)
 
-        ghost_indices = (@. distance_field < ratio * characteristic_lengths * sqrt(nd)) |> findall
+        circumradii = map(norm, eachcol(msh.widths)) ./ 2
+        ghost_indices = map(
+            (d, r) -> (
+                d >= ρmin * r && d <= ρmax * r
+            ),
+            sdf, circumradii
+        ) |> findall
 
-        select = v -> v[ghost_indices]
+        centers = msh.centers[:, ghost_indices]
+        projections = projections[:, ghost_indices]
+        ghost_sdf = sdf[ghost_indices]
+        circumradii = circumradii[ghost_indices]
 
-        distances = select(distance_field)
-        normals = select.(normals)
-        centers = select.(msh.centers)
-        projections = select.(projections)
+        ϵ = eps(eltype(centers))
+        nd = size(centers, 1)
 
-        image_distances = let cl = select(characteristic_lengths)
-            @. max(
-                   distances + cl * (sqrt(nd) * ratio) / 2,
-                   cl * sqrt(nd) / 2
-            )
-        end
+        normals = (centers .- projections) .* (@. sign(ghost_sdf) / (abs(ghost_sdf) + ϵ))'
+        image_distances = @. max(
+            circumradii * sqrt(nd), circumradii * sqrt(nd) * image_distance_ratio + ghost_sdf
+        )
 
-        images = map(
-            (p, n) -> p .+ n .* image_distances,
-            projections, normals
-        ) |> x -> mapreduce(v -> v', vcat, x)
-
-        image_interpolator = LinearInterpolator(msh, images)
+        image_points = projections .+ normals .* image_distances'
 
         Boundary(
             ghost_indices,
-            distances, image_distances,
+            ghost_sdf, image_distances,
             normals, centers, projections,
-            distance_field,
-            image_interpolator
+            sdf, Interpolator(msh, image_points, tree)
         )
-
     end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain boundary from stereolitography objects.
-
-    `ratio` defines that any cell separated from a boundary by no more than
-    `ratio * norm(cell.widths) * sqrt(ndims(msh))` will be flagged as a ghost point.
-
-    The projection to the surface is approximated for cells that are far from the boundary
-    by distances greater than `norm(widths) * approximation_ratio`.
-    """
-    function Boundary(
-        msh::Mesh, stls::Stereolitography...;
-        ratio::Real = 0.0,
-        approximation_ratio::Real = 1.2,
-    )
-
-        stl_joint = cat(stls...)
-        stltree = STLTree(stl_joint)
-
-        projs, _ = projections_and_distances(
-            msh.tree, stl_joint;
-            approximation_ratio = max(
-                approximation_ratio, ratio * 2
-            ) # avoid having image points in the approximation region
-        )
-
-        isin = trues(length(msh))
-        _flag_interior!(
-            isin,
-            msh.tree,
-            stltree,
-            msh.interior_point,
-            0.0
-        )
-
-        Boundary(msh, projs, isin; ratio = ratio)
-
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain boundary from a set of hypercube boundary specifications.
-
-    Example for a standard, 3D CFD inlet boundary:
-
-    ```
-    inlet = Boundary(
-        msh,
-        (1, false), # "back" face, first (x) axis
-        (2, false), # "bottom" face, second (y) axis
-        (2, true), # "top" face, second (y) axis
-        (3, false), # ...
-        (3, true)
-    )
-    ```
-
-    `ratio` defines that any cell separated from a boundary by no more than
-    `ratio * norm(cell.widths) * sqrt(ndims(msh))` will be flagged as a ghost point.
-    """
-    function Boundary(
-        msh::Mesh, faces::Tuple{Int64, Bool}...;
-        ratio::Real = 1.1,
-    )
-
-        projs = nothing
-        dists = nothing
-
-        for (face, isfront) in faces
-            if isnothing(projs)
-                projs, dists = boundary_proj_and_dist(msh.tree, face, isfront)
-            else
-                p, d = boundary_proj_and_dist(msh.tree, face, isfront)
-
-                for i = 1:length(d)
-                    if d[i] < dists[i]
-                        dists[i] = d[i]
-                        projs[:, i] .= p[:, i]
-                    end
-                end
-            end
-        end
-
-        Boundary(msh, projs; ratio = ratio)
-
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Convert a boundary to a given vector handling backend.
-    See the equivalent function for meshes.
-    """
-    to_backend(converter, bdry::Boundary) = Boundary(
-        converter(bdry.ghost_indices),
-        converter(bdry.distances), converter(bdry.image_distances),
-        converter.(bdry.normals), converter.(bdry.centers), converter.(bdry.projections),
-        converter(bdry.distance_field),
-        Interpolator(
-                     converter(bdry.image_interpolator.stencils),
-                     converter(bdry.image_interpolator.weights),
-        )
-    )
 
     """
     $TYPEDFIELDS
 
-    Struct to indicate a boundary condition.
+    Struct to define a domain
     """
-    struct BoundaryCondition
-        f
-        at_ghost::Bool
+    struct Domain
+        mesh::Mesher.Mesh
+        tree::Union{Nothing, KDTree}
+        stencil_interpolators::Dict{Tuple, Interpolator}
+        boundaries::Dict{String, Boundary}
+    end
+
+    """
+    $TYPEDSIGNATURES
+    
+    Instantiate domain from mesh.
+
+    Boundaries are defined from a ratio between the min. image point distance 
+    and the ghost cell circumradius, and a range of distances/circumradii at 
+    which cells are detected to be ghost points.
+    """
+    function Domain(
+        msh::Mesher.Mesh;
+        ghost_distance_ratio::Tuple{Float64, Float64} = (- Inf64, 1.0),
+        image_distance_ratio::Float64 = 1.0,
+    )
+        tree = KDTree(msh.centers)
+
+        Domain(
+            msh,
+            tree,
+            Dict{Tuple, Interpolator}(),
+            Dict{String, Boundary}(
+                [
+                    bname => Boundary(
+                        msh, tree, bname;
+                        ghost_distance_ratio = ghost_distance_ratio,
+                        image_distance_ratio = image_distance_ratio
+                    ) for bname in keys(msh.boundary_in_domain)
+                ]...
+            )
+        )
     end
 
     """
     $TYPEDSIGNATURES
 
-    Obtain a boundary condition from a BC function.
+    Obtain value of array at stencil point.
 
-    If `at_ghost` is true, the output values of `f` are directly assigned to
-    ghost cells. Otherwise, they are interpolated between image points and the boundary.
-
-    Example for non-penetration condition:
+    Example for y-axis derivative in 2D grid:
 
     ```
-    bc = BoundaryCondition() do bdry, u, v
-        nx, ny = bdry.normals
-
-        unormal = @. nx * u + ny * v
-
-        ( # note that fewer return values than input field variables may be specified.
-            u .- nx .* unormal,
-            v .- ny .* unormal
-        )
-    end
-    ```
-    """
-    BoundaryCondition(f; at_ghost::Bool = false) = BoundaryCondition(f, at_ghost)
-
-    """
-    $TYPEDSIGNATURES
-
-    Impose boundary condition (in place) to the provided variables.
-
-    Example for non-penetration condition:
-
-    ```
-    bc = BoundaryCondition() do bdry, u, v # field variables interpolated to image points before imposition
-        nx, ny = bdry.normals
-
-        unormal = @. nx * u + ny * v
-
-        ( # note that fewer return values than input field variables may be specified.
-            u .- nx .* unormal,
-            v .- ny .* unormal
-        )
-    end
-
-    impose_bc!(bc, bdry, u, v)
-    ```
-
-    Kwargs are passed to the BC function.
-    """
-    function impose_bc!(
-        bc, bdry::Boundary, u::AbstractVector{Float64}...;
-        kwargs...
+    dx, dy = eachrow(
+        domain.mesh.widths
     )
 
-        uimage = map(bdry.image_interpolator, u)
-        ubdry = bc.f(bdry, uimage...; kwargs...)
+    du!dy = (
+        domain(u, 0, 1) .- domain(u, 0, -1)
+    ) ./ (2 .* dy)
+    ```
+    """
+    function (domain::Domain)(
+        u::AbstractArray, inds::Int64...
+    )
+        v_inds = collect(inds)
 
-        if bc.at_ghost
-            for (uu, ub) in zip(u, ubdry)
-                uu[bdry.ghost_indices] .= ub
-            end
-        else
-            η = bdry.distances ./ bdry.image_distances
+        if all(v_inds .== 0)
+            return copy(u)
+        end
 
-            for (uu, ub, ui) in zip(u, ubdry, uimage)
-                uu[bdry.ghost_indices] .= (
-                    @. η * ui + (1.0 - η) * ub
+        if !haskey(domain.stencil_interpolators, inds)
+            domain.stencil_interpolators[inds] = Interpolator(
+                domain.mesh, 
+                domain.mesh.centers .+ v_inds .* domain.mesh.widths,
+                domain.tree
+            )
+        end
+
+        domain.stencil_interpolators[inds](u)
+    end
+
+    _mul_last(u::AbstractArray, v::AbstractVector) = let s = ones(Int64, ndims(u))
+        s[end] = length(v)
+
+        u .* reshape(v, s...)
+    end
+    _view_last(u::AbstractArray, i) = selectdim(
+        u, ndims(u), i
+    )
+
+    """
+    $TYPEDSIGNATURES
+
+    Impose boundary conditions in-place for state variables in `args`.
+    These state variables must be given by arrays in which the last dimension indicates
+    the cell index.
+
+    Function `f` should receive a boundary struct (boundary `domain.boundaries[bname]`)
+    and the values of `args` interpolated to image points, and return the values of one or more
+    state variables (as ordered in `args`) at the boundary.
+
+    Example for a 2D Euler wall imposed on a velocity field:
+
+    ```
+    impose_bc!(domain, "wall", u, v) do bdry, ui, vi
+        nx, ny = eachrow(bdry.normals)
+
+        un = @. ui * nx + vi * ny
+
+        (
+            ui .- un .* nx,
+            vi .- un .* ny
+        )
+    end
+    ```
+
+    Check `?ibm.Boundary` for other useful boundary properties.
+
+    Another implementation with multidimensional arrays would be:
+
+    ```
+    impose_bc!(domain, "wall", UV) do bdry, UVi
+        ui, vi = eachrow(UVi)
+
+        nx, ny = eachrow(bdry.normals)
+
+        un = @. ui * nx + vi * ny
+
+        vcat(
+            (ui .- un .* nx)',
+            (vi .- un .* ny)'
+        )
+    end
+    ```
+
+    Note that fewer return values than `args` may be returned, case in which the remaining `args`
+    are left unaltered, but are passed for boundary value calculation anyway.
+
+    All kwargs are forwarded to `f`.
+
+    The values are linearly interpolated/extrapolated to the boundary.
+    For other applications, `f` may directly return values at ghost points by turning
+    on flag `at_ghost`.
+    """
+    function impose_bc!(
+        f, domain::Domain, bname::String, args::AbstractArray...;
+        at_ghost::Bool = false,
+        kwargs...
+    )
+        bdry = domain.boundaries[bname]
+
+        aimage = map(bdry.image_interpolator, args)
+        fa = f(bdry, aimage...; kwargs...)
+        if !(fa isa Tuple)
+            fa = (fa,)
+        end
+
+        η = bdry.distances ./ bdry.image_distances
+        for (a, ab, ai) in zip(args, fa, aimage)
+            if at_ghost
+                _view_last(a, bdry.ghost_indices) .= ab
+            else
+                _view_last(a, bdry.ghost_indices) .= (
+                    _mul_last(ai, η) .+ _mul_last(ab, 1.0 .- η)
                 )
             end
         end
-
     end
-    
+
     function _simplex_normal(simplex::Matrix{Float64})
 
         p0 = simplex[:, 1]
@@ -654,7 +404,7 @@ module ImmersedBoundary
 
     Obtain simplex centers and normals (with norms equal to simplex areas).
     """
-    function centers_and_normals(stl::Stereolitography)
+    function centers_and_normals(stl::Mesher.Stereolitography)
 
         simplices = map(
             simp -> stl.points[:, simp], eachcol(stl.simplices)
@@ -683,9 +433,9 @@ module ImmersedBoundary
     Struct representing a surface for property integration and postprocessing
     """
     struct Surface
-        stereolitography::Stereolitography
-        points::Tuple{Vararg{AbstractVector{Float64}}}
-        normals::Tuple{Vararg{AbstractVector{Float64}}}
+        stereolitography::Mesher.Stereolitography
+        points::AbstractMatrix{Float64}
+        normals::AbstractMatrix{Float64}
         areas::AbstractVector{Float64}
         interpolator::Interpolator
     end
@@ -693,32 +443,26 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Obtain a surface from a mesh and a stereolitography object.
+    Obtain a surface from a domain and a stereolitography object.
 
     If `max_length` is provided, the STL surface is refined by tri splitting until no
     triangle side is larger than the provided value.
-
-    If `linear` is set to true, any interpolation between field variables and the surface
-    will be linear. Otherwise, Sherman's method (inverse distance weighing) is used.
     """
     function Surface(
-            msh::Mesh, stl::Stereolitography, max_length::Float64 = 0.0; 
-            linear::Bool = true
+        domain::Domain, stl::Mesher.Stereolitography; max_length::Float64 = 0.0
     )
 
+        msh = domain.mesh
+
         if max_length > 0.0
-            stl = refine_to_length(stl, max_length)
+            stl = Mesher.refine_to_length(stl, max_length)
         end
 
-        nd = ndims(msh)
+        nd = size(stl.points, 1)
 
-        interpolator = (
-            linear ?
-            LinearInterpolator(msh, stl) :
-            Interpolator(msh, stl)
-        )
+        interpolator = Interpolator(msh, stl.points, domain.tree)
 
-        points = copy.(eachrow(stl.points)) |> Tuple
+        points = copy(stl.points)
 
         _, normals = centers_and_normals(stl)
 
@@ -738,10 +482,10 @@ module ImmersedBoundary
         areas = map(
                     n -> norm(n) + ϵ, eachcol(normals)
         )
-        normals = copy.(eachrow(normals ./ areas')) |> Tuple
+        normals = normals ./ areas'
 
         Surface(
-            stl,
+            deepcopy(stl),
             points,
             normals,
             areas,
@@ -749,6 +493,30 @@ module ImmersedBoundary
         )
 
     end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain a surface from a domain and a set of mesh boundary names.
+
+    If `max_length` is provided, the STL surface is refined by tri splitting until no
+    triangle side is larger than the provided value.
+
+    If no boundaries are selected, all available triangulated surfaces are used.
+    """
+    Surface(
+        domain::Domain, bnames::String...; max_length::Float64 = 0.0
+    ) = (
+        length(bnames) == 0 ?
+        Surface(
+            domain, keys(domain.mesh.stereolitographies)...; max_length = max_length
+        ) :
+        let stl = map(
+            bname -> domain.mesh.stereolitographies[bname], bnames
+        ) |> x -> cat(x...)
+            Surface(domain, stl; max_length = max_length)
+        end
+    )
 
     """
     $TYPEDSIGNATURES
@@ -778,7 +546,7 @@ module ImmersedBoundary
             ]...
         )
 
-        stl2vtk(fname, surf.stereolitography; kws...)
+        Mesher.stl2vtk(fname, surf.stereolitography; kws...)
 
     end
 
@@ -790,11 +558,39 @@ module ImmersedBoundary
     surface_integral(surf::Surface, u::AbstractVector) = let uu = (
         length(u) == size(surf.stereolitography.points, 2) ?
         u :
-        u[surf]
+        surf(u)
     )
         surf.areas .* uu |> sum
     end
 
+    """
+    $TYPEDSIGNATURES
+
+    integrate a property throughout a surface. The last dimension in the array
+    is assumed to refer to point/cell indices
+    """
+    surface_integral(surf::Surface, u::AbstractArray) = mapslices(
+        uu -> surface_integral(surf, uu), u; dims = ndims(u)
+    ) |> uu -> dropdims(uu; dims = ndims(uu))
+    
+    """
+    $TYPEDSIGNATURES
+
+    ```
+    v = getalong(u, domain, 2, -1)
+    # ... is equivalent to:
+    v = domain(u, 0, -1, 0)
+    ```
+    """
+    function getalong(v::AbstractArray, domain::Domain, dim::Int64, offset::Int64)
+
+        inds = zeros(Int64, size(domain.mesh.centers, 1))
+        inds[dim] = offset
+
+        domain(v, inds...)
+
+    end
+    
     """  
     Evaluate the minmod flux limiter.
     """
@@ -821,15 +617,15 @@ module ImmersedBoundary
     Example:
 
     ```
-    uL_i12, uR_i12 = ibm.MUSCL(u, msh, 2) # along dimension y
+    uL_i12, uR_i12 = ibm.MUSCL(u, domain, 2) # along dimension y
     ```
     """
-    function MUSCL(u::AbstractArray, msh::Mesh, dim::Int64)
+    function MUSCL(u::AbstractArray, domain::Domain, dim::Int64)
 
-        uim1 = getalong(u, msh, dim, -1)
-        ui = getalong(u, msh, dim, 0)
-        uip1 = getalong(u, msh, dim, 1)
-        uip2 = getalong(u, msh, dim, 2)
+        uim1 = getalong(u, domain, dim, -1)
+        ui = getalong(u, domain, dim, 0)
+        uip1 = getalong(u, domain, dim, 1)
+        uip2 = getalong(u, domain, dim, 2)
 
         uL = @. muscl_minmod(uim1, ui, uip1)
         uR = @. muscl_minmod(uip2, uip1, ui)
@@ -847,114 +643,15 @@ module ImmersedBoundary
 
     Useful for debugging which points of your solution show first-order discretization.
     """
-    function flux_limiter(u::AbstractArray, msh::Mesh, dim::Int64)
+    function flux_limiter(u::AbstractArray, domain::Domain, dim::Int64)
 
-        uim1 = getalong(u, msh, dim, -1)
-        ui = getalong(u, msh, dim, 0)
-        uip1 = getalong(u, msh, dim, 1)
+        uim1 = getalong(u, domain, dim, -1)
+        ui = getalong(u, domain, dim, 0)
+        uip1 = getalong(u, domain, dim, 1)
 
         @. minmod(ui - uim1, uip1 - ui)
 
     end
-
-    """
-    $TYPEDFIELDS
-
-    Struct to define a coarse multigrid level
-    """
-    struct Multigrid
-        clusters::AbstractVector{Tuple{Int64, Int64}}
-        from_cluster::AbstractVector{Int64}
-        size_ratios::AbstractVector{Float64}
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain a coarse multigrid level.
-
-    The coarsened tree branches should have depth `max_depth` or lower.
-    If not provided, the coarsest grid with equal-sized leaf cells is selected.
-    """
-    function Multigrid(msh::Mesh, max_depth::Int64 = 1000)
-
-        tree = msh.tree
-
-        blks = blocks(tree, max_depth)
-
-        clusters = map(
-                       blk -> let lvs = leaves(blk)
-                           (
-                                minimum(l -> l.index, lvs),
-                                maximum(l -> l.index, lvs),
-                           )
-                       end,
-            blks
-        )
-
-        size_ratios = zeros(length(msh))
-        for blk in blks
-            ratio = blk.split_size ^ depth(blk)
-
-            for l in leaves(blk)
-                size_ratios[l.index] = ratio
-            end
-        end
-
-        from_cluster = zeros(Int64, length(msh))
-        for (k, cluster) in enumerate(clusters)
-                rng = cluster[1]:cluster[2]
-
-                from_cluster[rng] .= k
-        end
-
-        Multigrid(clusters, from_cluster, size_ratios)
-
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Convert a multigrid coarsener/prolongator struct to a given
-    array backend.
-    See the equivalent function for meshes.
-    """
-    to_backend(converter, mgrid::Multigrid) = Multigrid(
-                                                        converter(mgrid.clusters),
-                                                        converter(mgrid.from_cluster),
-            converter(mgrid.size_ratios)
-    )
-
-    """
-    $TYPEDSIGNATURES
-
-    Convert an array to a given coarse grid level 
-    (coarsen and prolongate back to the original).
-
-    The reduction function is such that the value of u
-    within a cluster will be replaced by `f(u[cluster])`.
-    """
-    (mgrid::Multigrid)(u::AbstractVector) = map(
-        clst -> let v = 0.0
-            for i = clst[1]:clst[2]
-                v += u[i]
-            end
-
-            v / (clst[2] - clst[1] + 1)
-        end,
-        mgrid.clusters
-    )[mgrid.from_cluster]
-
-    
-    """
-    $TYPEDSIGNATURES
-
-    Convert an array to a given coarse grid level 
-    (coarsen and prolongate back to the original).
-    """
-    (mgrid::Multigrid)(u::AbstractArray) = mapslices(
-        uu -> mgrid(uu), u; dims = ndims(u)
-    )
 
     """
     Reshape an array to match the last dimension of another
@@ -971,8 +668,8 @@ module ImmersedBoundary
 
     Obtain a backward derivative along dimension `dim`.
     """
-    ∇(u::AbstractArray, msh::Mesh, dim::Int64) = let uim1 = getalong(u, msh, dim, -1)
-        (u .- uim1) ./ _reshape_tolast(u, msh.spacing[dim])
+    ∇(u::AbstractArray, domain::Domain, dim::Int64) = let uim1 = getalong(u, domain, dim, -1)
+        (u .- uim1) ./ _reshape_tolast(u, view(domain.mesh.widths, dim, :))
     end
 
     """
@@ -980,8 +677,8 @@ module ImmersedBoundary
 
     Obtain a forward derivative along dimension `dim`.
     """
-    Δ(u::AbstractArray, msh::Mesh, dim::Int64) = let uip1 = getalong(u, msh, dim, 1)
-        (uip1 .- u) ./ _reshape_tolast(u, msh.spacing[dim])
+    Δ(u::AbstractArray, domain::Domain, dim::Int64) = let uip1 = getalong(u, domain, dim, 1)
+        (uip1 .- u) ./ _reshape_tolast(u, view(domain.mesh.widths, dim, :))
     end
 
     """
@@ -989,8 +686,10 @@ module ImmersedBoundary
 
     Obtain a central derivative along dimension `dim`.
     """
-    δ(u::AbstractArray, msh::Mesh, dim::Int64) = let uip1 = getalong(u, msh, dim, 1)
-        (uip1 .- getalong(u, msh, dim, -1)) ./ (2 .* _reshape_tolast(u, msh.spacing[dim]))
+    δ(u::AbstractArray, domain::Domain, dim::Int64) = let uip1 = getalong(u, domain, dim, 1)
+        (uip1 .- getalong(u, domain, dim, -1)) ./ (
+            2 .* _reshape_tolast(u, view(domain.mesh.widths, dim, :))
+        )
     end
 
     """
@@ -998,12 +697,11 @@ module ImmersedBoundary
 
     Obtain the average of a property at face `i + 1/2` along dimension `dim`.
     """
-    μ(u::AbstractArray, msh::Mesh, dim::Int64) = (
-        getalong(u, msh, dim, 1) .+ u
+    μ(u::AbstractArray, domain::Domain, dim::Int64) = (
+        getalong(u, domain, dim, 1) .+ u
     ) ./ 2
 
     include("cfd.jl")
     using .CFD
 
 end
-
