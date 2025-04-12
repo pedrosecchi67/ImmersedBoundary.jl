@@ -118,6 +118,24 @@ farfield_boundaries = [
 ]
 ```
 
+Meshes can be saved to JSON format files:
+
+```julia
+mshr.mesh2json("mesh.json", msh)
+msh = mshr.json2mesh("mesh.json")
+```
+
+Or used to build VTK output:
+
+```julia
+u = rand(length(msh)) 
+v = rand(2, length(msh)) 
+
+vtk = mshr.mesh2vtk("results", msh; u = u, v = v)
+```
+
+Arrays can be passed as kwargs to record cell data. The last dimension is assumed to refer to the cell index.
+
 ### Domain definition
 
 To define a PDE domain from a mesh, you can simply use:
