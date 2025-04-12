@@ -270,11 +270,18 @@ module ImmersedBoundary
         end
 
         if !haskey(domain.stencil_interpolators, inds)
-            domain.stencil_interpolators[inds] = Interpolator(
+            st = Interpolator(
                 domain.mesh, 
                 domain.mesh.centers .+ v_inds .* domain.mesh.widths,
                 domain.tree
             )
+
+            bend = domain.centers |> typeof |> x -> Base.typename(x).wrapper
+            if !(bend <: Array)
+                st = to_backend(st, x -> bend(x))
+            end
+
+            domain.stencil_interpolators[inds] = st
         end
 
         domain.stencil_interpolators[inds](u)
@@ -726,5 +733,13 @@ module ImmersedBoundary
 
     include("cfd.jl")
     using .CFD
+
+    include("arraybends.jl")
+    using .ArrayBackends
+
+    @declare_converter Interpolator
+    @declare_converter Boundary
+    @declare_converter Domain
+    @declare_converter Surface
 
 end
