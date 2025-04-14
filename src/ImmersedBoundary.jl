@@ -94,7 +94,7 @@ module ImmersedBoundary
     Evaluate interpolator
     """
     function (intp::Interpolator)(Q::AbstractVector)
-        Qnew = Q[1:intp.n_outputs] # poor way of copying array type to given length
+        Qnew = Q[1:min(intp.n_outputs, length(Q))] # poor way of copying array type to given length
 
         if length(intp.fetch_to) > 0
             Qnew[intp.fetch_to] .= Q[intp.fetch_from]
