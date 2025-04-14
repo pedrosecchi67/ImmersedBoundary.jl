@@ -793,7 +793,7 @@ module Mesher
                 ),
                 stereolitographies = Dict(
                                           [k => Dict(
-                                                     ["points" : v.points, "simplices" : v.simplices]...
+                                                     ["points" => v.points, "simplices" =>v.simplices]...
                                           ) for (k, v) in msh.stereolitographies]...
                 )
             )
@@ -818,7 +818,10 @@ module Mesher
                 ), Dict(
                     [k => Bool.(v) for (k, v) in d["boundary_in_domain"]]...
                 ), Dict(
-                    [k => Stereolitography(reduce(hcat, v["points"]), reduce(hcat, v["points"])) for (k, v) in d["stereolitographies"]]...
+                    [k => Stereolitography(
+                                           reduce(hcat, v["points"]) |> x -> Float64.(x), 
+                                           reduce(hcat, v["points"]) |> x -> Float64.(x)
+                           ) for (k, v) in d["stereolitographies"]]...
                 )
             )
         end
