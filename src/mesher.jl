@@ -791,6 +791,9 @@ module Mesher
                 boundary_in_domain = Dict(
                     [k => Int64.(v) for (k, v) in msh.boundary_in_domain]...
                 ),
+                stereolitographies = Dict(
+                    [k => {"points" : v.points, "simplices" : v.simplices} for (k, v) in msh.stereolitographies]...
+                )
             )
                 json = JSON.json(nt)
 
@@ -812,6 +815,8 @@ module Mesher
                     [k => reduce(hcat, v) for (k, v) in d["boundary_projections"]]...
                 ), Dict(
                     [k => Bool.(v) for (k, v) in d["boundary_in_domain"]]...
+                ), Dict(
+                    [k => Stereolitography(reduce(hcat, v["points"]), reduce(hcat, v["points"])) for (k, v) in d["stereolitographies"]]...
                 )
             )
         end
