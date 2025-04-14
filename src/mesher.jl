@@ -820,7 +820,7 @@ module Mesher
                 ), Dict(
                     [k => Stereolitography(
                                            reduce(hcat, v["points"]) |> x -> Float64.(x), 
-                                           reduce(hcat, v["points"]) |> x -> Float64.(x)
+                                           reduce(hcat, v["simplices"]) |> x -> Int64.(x)
                            ) for (k, v) in d["stereolitographies"]]...
                 )
             )
