@@ -25,10 +25,12 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Obtain interpolator based on a KDTree and matrix of evaluation points
+    Obtain interpolator based on a KDTree and matrix of evaluation points.
+    Uses linear interpolation (`linear = true`) or Sherman's interpolation (IDW).
     """
     function Interpolator(msh::Mesher.Mesh, X::AbstractMatrix, 
-        tree::Union{KDTree, Nothing} = nothing)
+        tree::Union{KDTree, Nothing} = nothing;
+        linear::Bool = true)
 
         if isnothing(tree)
             tree = KDTree(msh.centers)
@@ -53,13 +55,17 @@ module ImmersedBoundary
                 w = @. 1.0 / (ds + ϵ)
             end
 
-            A = mapreduce(
-                c -> [1.0 (c .- x)'],
-                vcat,
-                eachcol(cnts)
-            ) .* w
+            if linear
+                A = mapreduce(
+                    c -> [1.0 (c .- x)'],
+                    vcat,
+                    eachcol(cnts)
+                ) .* w
 
-            weights[:, j] .= pinv(A)[1, :] .* w
+                weights[:, j] .= pinv(A)[1, :] .* w
+            else
+                weights[:, j] .= (w ./ sum(w))
+            end
         end
 
         threshold = sqrt(eps(eltype(dists)))
@@ -723,12 +729,13 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Obtain interpolator from source to destination domains
+    Obtain interpolator from source to destination domains.
+    Uses IDW for stable multigrid operators
     """
     Interpolator(
         src::Domain, dst::Domain
     ) = Interpolator(
-        src.mesh, dst.mesh.centers, src.tree
+        src.mesh, dst.mesh.centers, src.tree; linear = false
     )
 
     include("cfd.jl")
