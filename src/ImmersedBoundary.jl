@@ -730,12 +730,11 @@ module ImmersedBoundary
     $TYPEDSIGNATURES
 
     Obtain interpolator from source to destination domains.
-    Uses IDW for stable multigrid operators
     """
     Interpolator(
         src::Domain, dst::Domain
     ) = Interpolator(
-        src.mesh, dst.mesh.centers, src.tree; linear = false
+        src.mesh, dst.mesh.centers, src.tree; linear = true
     )
 
     include("cfd.jl")
