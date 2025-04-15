@@ -100,7 +100,7 @@ module ImmersedBoundary
     Evaluate interpolator
     """
     function (intp::Interpolator)(Q::AbstractVector)
-        Qnew = typeof(Q)(undef, intp.n_outputs)
+        Qnew = similar(Q, eltype(Q), intp.n_outputs)
 
         if length(intp.fetch_to) > 0
             Qnew[intp.fetch_to] .= Q[intp.fetch_from]
@@ -727,15 +727,136 @@ module ImmersedBoundary
     end
 
     """
+    $TYPEDFIELDS
+
+    Struct to accumulate values over variable-length stencils
+    """
+    struct Accumulator
+        n_output::Int64
+        stencils::Dict{Int64, Tuple}
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Construct accumulator struct from stencils and weights.
+
+    Example:
+
+    ```
+    acc = Accumulator(
+        [[1, 2], [2, 3, 4]],
+        [[-1.0, 2.0], [3.0, 4.0, 5.0]]
+    )
+
+    v = [1, 2, 3, 4]
+    @show acc(v)
+    # [3.0, 38.0]
+    ```
+    """
+    function Accumulator(
+        inds::AbstractVector,
+        weights::Union{AbstractVector, Nothing} = nothing,
+    )
+        ls = length.(inds)
+
+        d = Dict{Int64, Tuple}()
+        for l in unique(ls)
+            isval = (ls .== l) |> findall
+
+            is = reduce(
+                hcat, inds[isval]
+            )
+            ws = nothing
+            if !isnothing(weights)
+                ws = reduce(
+                    hcat, weights[isval]
+                )
+            end
+
+            d[l] = (isval, is, ws)
+        end
+
+        n = length(ls)
+        Accumulator(n, d)
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Run accumulator over vector
+    """
+    function (acc::Accumulator)(v::AbstractVector)
+        vnew = similar(v, eltype(v), acc.n_output)
+
+        vnew .= 0
+        for (i, stencil, weights) in values(acc.stencils)
+            if isnothing(weights)
+                vnew[i] .= dropdims(
+                    sum(
+                        v[stencil];
+                        dims = 1
+                    );
+                    dims = 1
+                )
+            else
+                vnew[i] .= dropdims(
+                    sum(
+                        v[stencil] .* weights;
+                        dims = 1
+                    );
+                    dims = 1
+                )
+            end
+        end
+
+        vnew
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Run accumulator over array.
+    Summation occurs over last dimension
+    """
+    (acc::Accumulator)(v::AbstractArray) = mapslices(
+        acc, v; dims = ndims(v)
+    )
+
+    """
     $TYPEDSIGNATURES
 
     Obtain interpolator from source to destination domains.
+    Uses cell volume weighing
     """
-    Interpolator(
+    function Interpolator(
         src::Domain, dst::Domain
-    ) = Interpolator(
-        src.mesh, dst.mesh.centers, src.tree; linear = true
-    )
+    )::Accumulator
+        idx, _ = nn(src.tree, dst.centers)
+
+        circumradii = map(norm, eachcol(dst.widths)) ./ 2
+        volumes = map(prod, eachcol(src.widths))
+
+        indices = [
+            inrange(src.tree, x, r) for (x, r) in zip(
+                eachcol(dst.centers), circumradii
+            )
+        ]
+
+        for k = 1:length(indices)
+            if length(indices[k]) == 0
+                indices[k] = [idx[k]]
+            end
+        end
+
+        weights = [
+            let v = volumes[inds]
+                v ./ sum(v)
+            end for inds in indices
+        ]
+
+        Accumulator(indices, weights)
+    end
 
     include("cfd.jl")
     using .CFD
@@ -747,5 +868,6 @@ module ImmersedBoundary
     @declare_converter Boundary
     @declare_converter Domain
     @declare_converter Surface
+    @declare_converter Accumulator
 
 end
