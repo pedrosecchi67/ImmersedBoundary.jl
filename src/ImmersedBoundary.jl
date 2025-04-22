@@ -222,6 +222,8 @@ module ImmersedBoundary
         boundaries::Dict{String, Boundary}
         centers::AbstractMatrix{Float64}
         widths::AbstractMatrix{Float64}
+        ghost_distance_ratio::Tuple{Float64, Float64}
+        image_distance_ratio::Float64
     end
 
     """
@@ -253,7 +255,8 @@ module ImmersedBoundary
                     ) for bname in keys(msh.boundary_in_domain)
                 ]...
             ),
-            copy(msh.centers), copy(msh.widths)
+            copy(msh.centers), copy(msh.widths),
+            ghost_distance_ratio, image_distance_ratio
         )
     end
 
@@ -864,6 +867,156 @@ module ImmersedBoundary
         ]
 
         Accumulator(indices, weights)
+    end
+
+    """
+    $TYPEDFIELDS
+
+    Struct to describe a residual operator
+    """
+    struct Residual
+        f
+        subdomains::AbstractVector{Domain}
+        indices::AbstractVector{Vector{Int64}}
+        interiors::AbstractVector{Vector{Int64}}
+        fringes::AbstractVector{Vector{Int64}}
+        n_output::Int64
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Define residual operator.
+
+    Splits the domain into sub-domains of at most `max_size` cells
+    for "batch" evaluation.
+
+    Example:
+
+    ```
+    # last index of Q identifies cell index
+    # domain is split into subdomains of max. size 10000
+
+    residual = ibm.Residual(dmn; max_size = 10000) do domain, Q
+        u, v = copy(Q) |> eachrow
+
+        ibm.impose_bc!(domain, "wall", u, v) do bdry, U, V
+            nx, ny = eachrow(bdry.normals)
+            un = @. U * nx + V * ny
+
+            (
+                U .- un .* nx,
+                V .- un .* ny
+            )
+        end
+
+        [u'; v']
+    end
+
+    Q = rand(2, length(dmn.mesh))
+    resd = residual(Q)
+    ```
+
+    Other arguments may be passed to the residual evaluation/residual function, 
+    but only a single return array is expected. As with `Q`, the last dimension
+    in each array should identify cell index.
+
+    Kwargs are passed directly to the residual function.
+    """
+    function Residual(
+        f, domain::Domain;
+        max_size::Int64 = 1000000,
+    )
+        nc = size(domain.centers, 2)
+
+        subdomains = [domain]
+        indices = [collect(1:nc)]
+        interiors = [collect(1:nc)]
+        fringes = [Int64[]]
+        if nc > max_size
+            indices = Mesher.partition(domain.mesh, max_size; 
+                fringe = true, include_empty = true)
+
+            fringes = Vector{Int64}[]
+            interiors = Vector{Int64}[]
+            is_fringe = falses(nc)
+            for (inds, nofringe) in zip(
+                indices,
+                Mesher.partition(domain.mesh, max_size; 
+                    fringe = false, include_empty = true)
+            )
+                view_is_fringe = @view is_fringe[inds]
+
+                is_fringe[inds] .= true
+                is_fringe[nofringe] .= false
+
+                push!(
+                    fringes, findall(view_is_fringe)
+                )
+
+                is_interior = @. !view_is_fringe
+                push!(
+                    interiors, findall(is_interior)
+                )
+
+                view_is_fringe .= false
+            end
+
+            isval = map(
+                inds -> length(inds) > 0, interiors
+            ) |> findall
+
+            indices = indices[isval]
+            interiors = interiors[isval]
+            fringes = fringes[isval]
+
+            subdomains = map(
+                part -> Domain(
+                    domain.mesh[part];
+                    ghost_distance_ratio = domain.ghost_distance_ratio,
+                    image_distance_ratio = domain.image_distance_ratio,
+                ), indices
+            )
+        end
+
+        Residual(f, subdomains, indices, interiors, fringes, nc)
+    end
+
+    """
+    $TYPEDSIGNATURES
+    
+    Run residual evaluation given input array. The last dimension must identify
+    cell indices.
+
+    Kwargs are passed on to residual function.
+    """
+    function (resd::Residual)(args::AbstractArray...; kwargs...)
+        nc = resd.n_output
+
+        R = nothing
+        for (dmn, inds, interior) in zip(
+            resd.subdomains, resd.indices, resd.interiors
+        )
+            r = resd.f(
+                dmn,
+                map(
+                    a -> selectdim(a, ndims(a), inds) |> copy,
+                    args
+                )...;
+                kwargs...
+            )
+
+            if isnothing(R) # define return array
+                R = similar(
+                    r, size(r)[1:(end - 1)]..., nc
+                )
+            end
+
+            vr = selectdim(R, ndims(R), inds)
+            selectdim(vr, ndims(vr), interior) .= selectdim(r, ndims(r), interior)
+        end
+
+        R
     end
 
     include("cfd.jl")

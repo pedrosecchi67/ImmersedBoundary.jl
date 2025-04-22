@@ -834,10 +834,13 @@ module Mesher
         """
         dist2box(
             origins::AbstractMatrix, widths::AbstractMatrix,
-            o::AbstractVector, w::AbstractVector
+            o::AbstractVector, w::AbstractVector;
+            fringe::Bool = true
         ) = (
             @. max(
-                abs((origins + widths / 2) - (o + w / 2)) - (w + widths) / 2 - min(
+                abs((origins + widths / 2) - (o + w / 2)) - (
+                    w + widths
+                ) / 2 + (1 - 2 * fringe) * min(
                     widths, w
                 ) * 1e-5,
                 0.0
@@ -854,8 +857,11 @@ module Mesher
         partition as a `Mesh` struct.
 
         Each partition includes the cells contained in or adjacent to a given hypercube.
+        Using `fringe = false` removes the adjacent cells.
         """
-        function partition(msh::Mesh, max_size::Int64)
+        function partition(msh::Mesh, max_size::Int64; 
+            fringe::Bool = true,
+            include_empty::Bool = false)
             origin = map(
                 minimum, eachrow(msh.origins)
             )
@@ -887,16 +893,17 @@ module Mesher
                             w = widths ./ 2
 
                             isval = dist2box(
-                                os, ws, o, w
+                                os, ws, o, w;
+                                fringe = fringe
                             ) .<= eps(eltype(o))
 
-                            if any(isval)
+                            if include_empty || any(isval)
                                 push!(new_cubes, (o, w))
                                 push!(new_parts, part[isval])
                             end
                         end
                     else
-                        if length(part) > 0
+                        if include_empty || length(part) > 0
                             push!(new_cubes, (origin, widths))
                             push!(new_parts, part)
                         end

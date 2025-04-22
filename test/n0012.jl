@@ -30,7 +30,27 @@ for i = 1:4
     uavg .= ibm.smooth(uavg, dmn)
 end
 
-vtk = mshr.vtk_grid("n0012", msh; uavg = uavg, u = u)
+residual = ibm.Residual(dmn; max_size = 10000) do domain, Q
+    u, v = copy(Q) |> eachrow
+
+    ibm.impose_bc!(domain, "wall", u, v) do bdry, U, V
+        nx, ny = eachrow(bdry.normals)
+        un = @. U * nx + V * ny
+
+        (
+            U .- un .* nx,
+            V .- un .* ny
+        )
+    end
+
+    [u'; v']
+end
+
+Q = zeros(2, length(msh))
+Q[1, :] .= 1.0
+R = residual(Q)
+
+vtk = mshr.vtk_grid("n0012", msh; uavg = uavg, u = u, Q = Q, R = R)
 mshr.vtk_save(vtk)
 
 dmn_coarse = ibm.Domain(meshes[end])
@@ -40,8 +60,6 @@ u = intp(u)
 vtk = mshr.vtk_grid("n0012_coarse", meshes[end]; u = u)
 mshr.vtk_save(vtk)
 
-parts = mshr.partition(msh, 10000)
-smsh = msh[parts[10]]
-
-vtk = mshr.vtk_grid("n0012_subdomain", smsh)
+sub = residual.subdomains[15]
+vtk = mshr.vtk_grid("n0012_subdomain", sub.mesh)
 mshr.vtk_save(vtk)
