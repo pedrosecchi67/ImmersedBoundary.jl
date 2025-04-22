@@ -27,9 +27,11 @@ dmn_coarse = ibm.Domain(meshes[end])
 
 intp = ibm.Interpolator(dmn, dmn_coarse)
 
-residual = ibm.BatchResidual(dmn; 
+residual = ibm.BatchResidual(
+    dmn; 
     max_size = 10000,
-    converter = CuArray) do domain, Q
+) do domain, Q
+    domain = ibm.to_backend(domain, CuArray)
     Q = CuArray(Q)
 
     u, v = copy(Q) |> eachrow

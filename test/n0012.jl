@@ -31,8 +31,7 @@ for i = 1:4
 end
 
 residual = ibm.BatchResidual(dmn; 
-    max_size = 10000,
-    converter = x -> x) do domain, Q
+    max_size = 10000) do domain, Q
     u, v = eachrow(Q)
 
     ibm.impose_bc!(domain, "wall", u, v) do bdry, U, V

@@ -280,9 +280,11 @@ GPUs (and cheap computers!) have tight memory limits, which may make it tricky t
 To mitigate this problem, we provide the `BatchResidual` struct:
 
 ```julia
-residual = ibm.BatchResidual(dmn; 
-    max_size = 10000,
-    converter = CuArray) do domain, Q
+residual = ibm.BatchResidual(
+    dmn; 
+    max_size = 10000
+) do domain, Q
+    domain = ibm.to_backend(domain, CuArray)
     Q = CuArray(Q)
 
     u, v = eachrow(Q)

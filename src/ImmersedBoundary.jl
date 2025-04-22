@@ -893,7 +893,6 @@ module ImmersedBoundary
         interiors::AbstractVector{Vector{Int64}}
         fringes::AbstractVector{Vector{Int64}}
         n_output::Int64
-        converter
     end
 
     """
@@ -935,13 +934,10 @@ module ImmersedBoundary
     in each array should identify cell index.
 
     Kwargs are passed directly to the residual function.
-
-    Converts subdomains to a given backend using converter function `converter`.
     """
     function BatchResidual(
         f, domain::Domain;
-        max_size::Int64 = 1000000,
-        converter = nothing
+        max_size::Int64 = typemax(Int64),
     )
         nc = size(domain.centers, 2)
 
@@ -995,7 +991,7 @@ module ImmersedBoundary
             )
         end
 
-        BatchResidual(f, subdomains, indices, interiors, fringes, nc, converter)
+        BatchResidual(f, subdomains, indices, interiors, fringes, nc)
     end
 
     """
@@ -1014,7 +1010,7 @@ module ImmersedBoundary
             resd.subdomains, resd.indices, resd.interiors
         )
             r = resd.f(
-                to_backend(dmn, resd.converter),
+                dmn,
                 map(
                     a -> selectdim(a, ndims(a), inds) |> copy,
                     args
