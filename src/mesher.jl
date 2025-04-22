@@ -826,4 +826,109 @@ module Mesher
             )
         end
 
+        """
+        $TYPEDSIGNATURES
+
+        Obtain distance between a set of boxes (cells) and
+        another box, both identified by origins and widths.
+        """
+        dist2box(
+            origins::AbstractMatrix, widths::AbstractMatrix,
+            o::AbstractVector, w::AbstractVector
+        ) = (
+            @. max(
+                abs((origins + widths / 2) - (o + w / 2)) - (w + widths) / 2 - min(
+                    widths, w
+                ) * 1e-5,
+                0.0
+            ) ^ 2
+        ) |> eachrow |> sum |> x -> sqrt.(x)
+
+        """
+        $TYPEDSIGNATURES
+
+        Obtain subdivisions of a mesh based on octree splitting.
+
+        Returns a vector of index vectors, each indicating a partition. 
+        You may use getindex via `msh[partitions(msh)[10]]`, for example, to obtain a 
+        partition as a `Mesh` struct.
+
+        Each partition includes the cells contained in or adjacent to a given hypercube.
+        """
+        function partition(msh::Mesh, max_size::Int64)
+            origin = map(
+                minimum, eachrow(msh.origins)
+            )
+            widths = map(
+                maximum, eachrow(msh.origins .+ msh.widths)
+            ) .- origin
+
+            cubes = [(origin, widths)]
+            parts = [
+                collect(1:size(msh.centers, 2))
+            ]
+
+            while !all(p -> length(p) <= max_size, parts)
+                new_cubes = []
+                new_parts = []
+
+                for i = 1:length(parts)
+                    part = parts[i]
+                    origin, widths = cubes[i]
+
+                    if length(part) > max_size
+                        os = view(msh.origins, :, part)
+                        ws = view(msh.widths, :, part)
+
+                        for mult in Iterators.product(
+                                            fill((0, 1), length(origin))...
+                        )
+                            o = origin .+ (widths .* mult) ./ 2
+                            w = widths ./ 2
+
+                            isval = dist2box(
+                                os, ws, o, w
+                            ) .<= eps(eltype(o))
+
+                            if any(isval)
+                                push!(new_cubes, (o, w))
+                                push!(new_parts, part[isval])
+                            end
+                        end
+                    else
+                        if length(part) > 0
+                            push!(new_cubes, (origin, widths))
+                            push!(new_parts, part)
+                        end
+                    end
+                end
+
+                cubes = new_cubes
+                parts = new_parts
+            end
+
+            parts
+        end
+
+        """
+        $TYPEDSIGNATURES
+
+        Given an array of cell indices indicating a partition, 
+        return the `Mesh` struct corresponding to selected cells, only
+        """
+        Base.getindex(msh::Mesh, part::AbstractVector) = Mesh(
+            msh.origins[:, part], msh.widths[:, part], msh.centers[:, part],
+            Dict(
+                [
+                    k => v[:, part] for (k, v) in msh.boundary_projections
+                ]...
+            ),
+            Dict(
+                [
+                    k => v[part] for (k, v) in msh.boundary_in_domain
+                ]...
+            ),
+            msh.stereolitographies
+        )
+
 end

@@ -39,3 +39,9 @@ u = intp(u)
 
 vtk = mshr.vtk_grid("n0012_coarse", meshes[end]; u = u)
 mshr.vtk_save(vtk)
+
+parts = mshr.partition(msh, 10000)
+smsh = msh[parts[10]]
+
+vtk = mshr.vtk_grid("n0012_subdomain", smsh)
+mshr.vtk_save(vtk)
