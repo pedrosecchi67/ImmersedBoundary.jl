@@ -273,6 +273,40 @@ intp = ibm.to_backend(intp, CuArray) # interpolators
 dmn = ibm.to_backend(dmn, Array)
 ```
 
+### Batch residual evaluation
+
+GPUs (and cheap computers!) have tight memory limits, which may make it tricky to evaluate residuals in large meshes.
+
+To mitigate this problem, we provide the `BatchResidual` struct:
+
+```julia
+residual = ibm.BatchResidual(dmn; 
+    max_size = 10000,
+    converter = CuArray) do domain, Q
+    Q = CuArray(Q)
+
+    u, v = eachrow(Q)
+
+    ibm.impose_bc!(domain, "wall", u, v) do bdry, U, V
+        nx, ny = eachrow(bdry.normals)
+        un = @. U * nx + V * ny
+
+        (
+            U .- un .* nx,
+            V .- un .* ny
+        )
+    end
+
+    [u'; v'] |> Array
+end
+
+R = residual(Q)
+```
+
+Which creates mesh partitions of, at most, `max_size` cells and calculates the residual at one partition at a time.
+
+Note that this involves transporting small batches of data to and from a GPU, which may be costly with a small `max_size`.
+
 ### CFD utilities
 
 For easier implementation of CFD codes, you may use the module `ImmersedBoundary.CFD`. Check the docstrings for the following functions:

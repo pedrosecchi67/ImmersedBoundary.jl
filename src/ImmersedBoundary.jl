@@ -893,6 +893,7 @@ module ImmersedBoundary
         interiors::AbstractVector{Vector{Int64}}
         fringes::AbstractVector{Vector{Int64}}
         n_output::Int64
+        converter
     end
 
     """
@@ -994,14 +995,7 @@ module ImmersedBoundary
             )
         end
 
-        if !isnothing(converter)
-            subdomains = map(
-                sub -> to_backend(sub, converter),
-                subdomains
-            )
-        end
-
-        BatchResidual(f, subdomains, indices, interiors, fringes, nc)
+        BatchResidual(f, subdomains, indices, interiors, fringes, nc, converter)
     end
 
     """
@@ -1020,7 +1014,7 @@ module ImmersedBoundary
             resd.subdomains, resd.indices, resd.interiors
         )
             r = resd.f(
-                dmn,
+                to_backend(dmn, resd.converter),
                 map(
                     a -> selectdim(a, ndims(a), inds) |> copy,
                     args
