@@ -869,12 +869,24 @@ module ImmersedBoundary
         Accumulator(indices, weights)
     end
 
+    include("cfd.jl")
+    using .CFD
+
+    include("arraybends.jl")
+    using .ArrayBackends
+
+    @declare_converter Interpolator
+    @declare_converter Boundary
+    @declare_converter Domain
+    @declare_converter Surface
+    @declare_converter Accumulator
+
     """
     $TYPEDFIELDS
 
     Struct to describe a residual operator
     """
-    struct Residual
+    struct BatchResidual
         f
         subdomains::AbstractVector{Domain}
         indices::AbstractVector{Vector{Int64}}
@@ -897,8 +909,8 @@ module ImmersedBoundary
     # last index of Q identifies cell index
     # domain is split into subdomains of max. size 10000
 
-    residual = ibm.Residual(dmn; max_size = 10000) do domain, Q
-        u, v = copy(Q) |> eachrow
+    residual = ibm.BatchResidual(dmn; max_size = 10000) do domain, Q
+        u, v = eachrow(Q)
 
         ibm.impose_bc!(domain, "wall", u, v) do bdry, U, V
             nx, ny = eachrow(bdry.normals)
@@ -922,10 +934,13 @@ module ImmersedBoundary
     in each array should identify cell index.
 
     Kwargs are passed directly to the residual function.
+
+    Converts subdomains to a given backend using converter function `converter`.
     """
-    function Residual(
+    function BatchResidual(
         f, domain::Domain;
         max_size::Int64 = 1000000,
+        converter = nothing
     )
         nc = size(domain.centers, 2)
 
@@ -979,7 +994,14 @@ module ImmersedBoundary
             )
         end
 
-        Residual(f, subdomains, indices, interiors, fringes, nc)
+        if !isnothing(converter)
+            subdomains = map(
+                sub -> to_backend(sub, converter),
+                subdomains
+            )
+        end
+
+        BatchResidual(f, subdomains, indices, interiors, fringes, nc)
     end
 
     """
@@ -990,7 +1012,7 @@ module ImmersedBoundary
 
     Kwargs are passed on to residual function.
     """
-    function (resd::Residual)(args::AbstractArray...; kwargs...)
+    function (resd::BatchResidual)(args::AbstractArray...; kwargs...)
         nc = resd.n_output
 
         R = nothing
@@ -1018,17 +1040,5 @@ module ImmersedBoundary
 
         R
     end
-
-    include("cfd.jl")
-    using .CFD
-
-    include("arraybends.jl")
-    using .ArrayBackends
-
-    @declare_converter Interpolator
-    @declare_converter Boundary
-    @declare_converter Domain
-    @declare_converter Surface
-    @declare_converter Accumulator
 
 end

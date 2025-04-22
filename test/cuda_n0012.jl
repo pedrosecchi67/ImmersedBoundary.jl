@@ -27,6 +27,26 @@ dmn_coarse = ibm.Domain(meshes[end])
 
 intp = ibm.Interpolator(dmn, dmn_coarse)
 
+residual = ibm.BatchResidual(dmn; 
+    max_size = 10000,
+    converter = CuArray) do domain, Q
+    Q = CuArray(Q)
+
+    u, v = copy(Q) |> eachrow
+
+    ibm.impose_bc!(domain, "wall", u, v) do bdry, U, V
+        nx, ny = eachrow(bdry.normals)
+        un = @. U * nx + V * ny
+
+        (
+            U .- un .* nx,
+            V .- un .* ny
+        )
+    end
+
+    [u'; v'] |> Array
+end
+
 dmn = ibm.to_backend(dmn, CuArray)
 intp = ibm.to_backend(intp, CuArray)
 
@@ -57,6 +77,11 @@ ibm.impose_bc!(dmn, "wall", UV) do bdry, UVi
     )
 end
 
+Q = similar(dmn.centers)
+Q[1, :] .= 1.0
+Q[2, :] .= 0.0
+R = residual(Q)
+
 dmn = ibm.to_backend(dmn, Array)
 intp = ibm.to_backend(intp, Array)
 
@@ -65,7 +90,7 @@ uavg = ibm.to_backend(uavg, Array)
 ucoarse = ibm.to_backend(ucoarse, Array)
 UV = ibm.to_backend(UV, Array)
 
-vtk = mshr.vtk_grid("n0012", msh; uavg = uavg, u = u, UV = UV)
+vtk = mshr.vtk_grid("n0012", msh; uavg = uavg, u = u, UV = UV, R = R)
 mshr.vtk_save(vtk)
 
 vtk = mshr.vtk_grid("n0012_coarse", meshes[end]; u = ucoarse)

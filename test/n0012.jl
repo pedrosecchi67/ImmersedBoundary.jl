@@ -30,8 +30,10 @@ for i = 1:4
     uavg .= ibm.smooth(uavg, dmn)
 end
 
-residual = ibm.Residual(dmn; max_size = 10000) do domain, Q
-    u, v = copy(Q) |> eachrow
+residual = ibm.BatchResidual(dmn; 
+    max_size = 10000,
+    converter = x -> x) do domain, Q
+    u, v = eachrow(Q)
 
     ibm.impose_bc!(domain, "wall", u, v) do bdry, U, V
         nx, ny = eachrow(bdry.normals)
