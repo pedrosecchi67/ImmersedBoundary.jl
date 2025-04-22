@@ -38,8 +38,16 @@ module ImmersedBoundary
 
         n_outputs = size(X, 2)
         nd = size(X, 1)
-
         kneighs = 2 ^ nd
+
+        if n_outputs == 0
+            return Interpolator(
+                0, Int64[], Int64[], 
+                Int64[], 
+                Matrix{Int64}(undef, kneighs, 0), Matrix{Float64}(undef, kneighs, 0)
+            )
+        end
+
         stencils, dists = knn(tree, X, kneighs)
         stencils = reduce(hcat, stencils)
         dists = reduce(hcat, dists)
