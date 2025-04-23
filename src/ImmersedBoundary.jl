@@ -1139,7 +1139,41 @@ module ImmersedBoundary
     $TYPEDSIGNATURES
 
     Run Newton-Krylov solver and obtain corrections for the first input array `Q`
-    (state variables).
+    (state variables, last dimension indicating cell index).
+
+    1D example with another auxiliary field variable:
+
+    ```
+    # domains is a vector of `ibm.Domain` structs corresponding to ever coarser multigrid levels.
+
+    n_iter = 10 # number of GMRES iterations
+
+    solver = ibm.NKSolver(domains...; n_iter = n_iter) do dom, u, ν
+        uavg = (
+            dom(u, -1, 0) .+ dom(u, 1, 0) .+ dom(u, 0, -1) .+ dom(u, 0, 1)
+        ) ./ 4
+
+        ibm.impose_bc!(dom, "wall", uavg) do bdry, ui
+            ub = similar(ui)
+            ub .= 1.0
+
+            ub
+        end
+        ibm.impose_bc!(dom, "farfield", uavg) do bdry, ui
+            ui .* 0.0
+        end
+
+        (uavg .- u) .* ν
+    end
+
+    ν = fill(2.0, length(msh))
+    u = zeros(length(msh))
+
+    for _ = 1:10 # 10 iterations
+        # solver returns approx. linear corrections:
+        u .+= solver(u, ν)
+    end
+    ```
 
     Kwargs are passed to residual functions.
 
