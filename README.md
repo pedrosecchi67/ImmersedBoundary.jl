@@ -309,6 +309,46 @@ Which creates mesh partitions of, at most, `max_size` cells and calculates the r
 
 Note that this involves transporting small batches of data to and from a GPU, which may be costly with a small `max_size`.
 
+### Newton-Krylov solutions
+
+We also provide utilities for multigrid-accelerated Newton-Krylov solutions using GMRES.
+
+An example is given below, solving for `u` (always the first array input, with its last dimension indicating cell indices) with auxiliary field variable `ν` (similar structure).
+
+Note that kwargs may also be passed to `solver`, being forwarded to the residual function.
+
+```julia
+# domains is a vector of `ibm.Domain` structs corresponding to ever coarser multigrid levels.
+
+n_iter = 10 # number of GMRES iterations
+
+solver = ibm.NKSolver(domains...; n_iter = n_iter) do dom, u, ν
+    uavg = (
+        dom(u, -1, 0) .+ dom(u, 1, 0) .+ dom(u, 0, -1) .+ dom(u, 0, 1)
+    ) ./ 4
+
+    ibm.impose_bc!(dom, "wall", uavg) do bdry, ui
+        ub = similar(ui)
+        ub .= 1.0
+
+        ub
+    end
+    ibm.impose_bc!(dom, "farfield", uavg) do bdry, ui
+        ui .* 0.0
+    end
+
+    (uavg .- u) .* ν
+end
+
+ν = fill(2.0, length(msh))
+u = zeros(length(msh))
+
+for _ = 1:10 # 10 iterations
+    # solver returns approx. linear corrections:
+    u .+= solver(u, ν)
+end
+```
+
 ### CFD utilities
 
 For easier implementation of CFD codes, you may use the module `ImmersedBoundary.CFD`. Check the docstrings for the following functions:
@@ -322,4 +362,6 @@ For easier implementation of CFD codes, you may use the module `ImmersedBoundary
 ?ibm.CFD.rms
 ?ibm.CFD.HLL
 ?ibm.JSTKE
+?ibm.GMRES.Linearization
+?ibm.GMRES.gmres
 ```

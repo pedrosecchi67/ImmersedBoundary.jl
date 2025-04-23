@@ -374,7 +374,7 @@ module ImmersedBoundary
     )
         bdry = domain.boundaries[bname]
 
-        aimage = map(bdry.image_interpolator, args)
+        aimage = copy.(map(bdry.image_interpolator, args))
         fa = f(bdry, aimage...; kwargs...)
         if !(fa isa Tuple)
             fa = (fa,)
@@ -1030,5 +1030,134 @@ module ImmersedBoundary
 
         R
     end
+
+    """
+    $TYPEDFIELDS
+
+    Struct to define a multigrid Newton-Krylov (GMRES) solver
+    for a non-linear equation residual.
+    """
+    struct NKSolver
+        batch_residuals::Vector{BatchResidual}
+        coarseners::Vector{Accumulator}
+        prolongators::Vector{Accumulator}
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Constructor for a Newton-Krylov solver.
+    """
+    function NKSolver(
+        f, domains::Domain...;
+        max_size::Int64 = 1000000,
+    )
+        domains = collect(domains)
+
+        batch_residuals = map(
+            dmn -> BatchResidual(f, dmn; max_size = max_size),
+            domains
+        )
+        
+        coarseners = Accumulator[]
+        prolongators = Accumulator[]
+
+        for i = 2:length(domains)
+            push!(
+                coarseners, Interpolator(domains[i - 1], domains[i])
+            )
+            push!(
+                prolongators, Interpolator(domains[i], domains[i - 1])
+            )
+        end
+
+        NKSolver(batch_residuals, coarseners, prolongators)
+    end
+
+    include("gmres.jl")
+    import .GMRES
+
+    """
+    $TYPEDSIGNATURES
+
+    Recursive function for multigrid Newton system solution.
+
+    `h` (optional) is the differentiation step for Jacobian-vector prod.
+    linearization.
+    """
+    function mgrid_newton(
+        Q::AbstractArray, args::AbstractArray...;
+        bfs::AbstractVector{BatchResidual} = [],
+        coarseners::AbstractVector{Accumulator} = [],
+        prolongators::AbstractVector{Accumulator} = [],
+        h::Real = 0.0,
+        n_iter::Int64 = 10,
+        r = nothing,
+        kwargs...
+    )
+        bf = bfs[1]
+
+        A, b = GMRES.Linearization(
+            q -> bf(q, args...; kwargs...),
+            Q; h = h,
+        )
+
+        if !isnothing(r)
+            b .= r
+        end
+
+        ds = 0.0
+        if length(coarseners) > 0
+            coars = coarseners[1]
+            prolong = prolongators[1]
+
+            sc = mgrid_newton(
+                coars(Q), map(coars, args)...;
+                bfs = bfs[2:end],
+                coarseners = coarseners[2:end],
+                prolongators = prolongators[2:end],
+                h = h,
+                r = coars(b),
+                n_iter = n_iter,
+                kwargs...
+            )
+
+            ds = prolong(sc)
+            b .-= A(ds)
+        end
+
+        s, _ = GMRES.gmres(
+            A, b, n_iter
+        )
+
+        s .+= ds
+
+        s
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Run Newton-Krylov solver and obtain corrections for the first input array `Q`
+    (state variables).
+
+    Kwargs are passed to residual functions.
+
+    `h` is the step length for linearization purposes.
+    """
+    (solver::NKSolver)(
+        Q::AbstractArray, args::AbstractArray...;
+        h::Real = 0.0,
+        n_iter::Int64 = 10,
+        kwargs...
+    ) = mgrid_newton(
+        Q, args...;
+        bfs = solver.batch_residuals,
+        coarseners = solver.coarseners,
+        prolongators = solver.prolongators,
+        h = h,
+        n_iter = n_iter,
+        kwargs...
+    )
 
 end

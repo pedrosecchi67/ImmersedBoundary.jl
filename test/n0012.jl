@@ -20,7 +20,8 @@ meshes = mshr.Multigrid(
 )
 
 msh = meshes[1]
-dmn = ibm.Domain(msh)
+domains = ibm.Domain.(meshes)
+dmn = domains[1]
 
 x, y = eachrow(dmn.centers)
 
@@ -50,6 +51,31 @@ end
 Q = zeros(2, length(msh))
 Q[1, :] .= 1.0
 R = residual(Q)
+
+solver = ibm.NKSolver(domains...) do dom, u, ν
+    uavg = (
+        dom(u, -1, 0) .+ dom(u, 1, 0) .+ dom(u, 0, -1) .+ dom(u, 0, 1)
+    ) ./ 4
+
+    ibm.impose_bc!(dom, "wall", uavg) do bdry, ui
+        ub = similar(ui)
+        ub .= 1.0
+
+        ub
+    end
+    ibm.impose_bc!(dom, "farfield", uavg) do bdry, ui
+        ui .* 0.0
+    end
+
+    (uavg .- u) .* ν
+end
+
+ν = fill(2.0, length(msh))
+u = zeros(length(msh))
+
+for _ = 1:10 # 10 iterations
+    u .+= solver(u, ν)
+end
 
 vtk = mshr.vtk_grid("n0012", msh; uavg = uavg, u = u, Q = Q, R = R)
 mshr.vtk_save(vtk)
