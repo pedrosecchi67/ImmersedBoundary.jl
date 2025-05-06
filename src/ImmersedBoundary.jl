@@ -996,6 +996,34 @@ module ImmersedBoundary
 
     """
     $TYPEDSIGNATURES
+
+    Obtain residual at partition `ipart`. Residuals at fringe cells
+    are converted to `-Q`, if `Q` is the state variable array (first arg).
+
+    Kwargs are passed on to residual function.
+    """
+    function (resd::BatchResidual)(ipart::Int64, args::AbstractArray...; kwargs...)
+        dmn = resd.subdomains[ipart]
+        fringe = resd.fringes[ipart]
+
+        r = resd.f(
+            dmn,
+            args...;
+            kwargs...
+        )
+        Q = args[1]
+
+        if size(Q) != size(r)
+            throw(error("Residual and state variable arrays have unequal shapes"))
+        end
+
+        selectdim(r, ndims(r), fringe) .= .- selectdim(Q, ndims(Q), fringe)
+
+        r
+    end
+
+    """
+    $TYPEDSIGNATURES
     
     Run residual evaluation given input array. The last dimension must identify
     cell indices.
@@ -1006,17 +1034,15 @@ module ImmersedBoundary
         nc = resd.n_output
 
         R = nothing
-        for (dmn, inds, interior) in zip(
-            resd.subdomains, resd.indices, resd.interiors
-        )
-            r = resd.f(
-                dmn,
-                map(
-                    a -> selectdim(a, ndims(a), inds) |> copy,
-                    args
-                )...;
-                kwargs...
+        for (ipart, (inds, interior)) in zip(
+            resd.indices, resd.interiors
+        ) |> enumerate
+            pargs = map(
+                a -> selectdim(a, ndims(a), inds) |> copy,
+                args
             )
+
+            r = resd(ipart, pargs...; kwargs...)
 
             if isnothing(R) # define return array
                 R = similar(
@@ -1080,6 +1106,51 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
+    Use GMRES on each mesh partition of a batch residual struct and
+    return the ensueing correction array.
+    """
+    function batch_NK(
+        bf::BatchResidual, Q::AbstractArray, args::AbstractArray...;
+        h::Real = 0.0,
+        r = nothing,
+        n_iter::Int64 = 10,
+        kwargs...
+    )
+        s = similar(Q)
+        s .= 0.0
+
+        for (i, (inds, fringe)) in zip(
+            bf.indices, bf.fringes
+        ) |> enumerate
+            pQ = selectdim(Q, ndims(Q), inds) |> copy
+            pargs = map(
+                a -> selectdim(a, ndims(a), inds) |> copy,
+                args
+            )
+
+            A, b = GMRES.Linearization(
+                pq -> bf(i, pq, pargs...; kwargs...),
+                pQ; h = h
+            )
+
+            if !isnothing(r) # prescribed residuals from previous iteration
+                b .= selectdim(r, ndims(r), inds)
+            end
+            selectdim(b, ndims(b), fringe) .= 0.0 # set Dirichlet 0 BC
+            # at batch fringes
+
+            ps = selectdim(s, ndims(s), inds)
+            pps, _ = GMRES.gmres(A, b, n_iter)
+
+            ps .+= pps
+        end
+
+        s
+    end
+
+    """
+    $TYPEDSIGNATURES
+
     Recursive function for multigrid Newton system solution.
 
     `h` (optional) is the differentiation step for Jacobian-vector prod.
@@ -1126,9 +1197,10 @@ module ImmersedBoundary
             b .-= A(ds)
         end
 
-        s, _ = GMRES.gmres(
-            A, b, n_iter
-        )
+        s = batch_NK(bf, Q, args...; 
+            r = b,
+            h = h, n_iter = n_iter,
+            kwargs...)
 
         s .+= ds
 

@@ -77,6 +77,11 @@ for _ = 1:10 # 10 iterations
     u .+= solver(u, ν)
 end
 
+surf = ibm.Surface(dmn, "wall")
+
+vtk = ibm.surf2vtk("n0012_surf", surf; u = u)
+mshr.vtk_save(vtk)
+
 vtk = mshr.vtk_grid("n0012", msh; uavg = uavg, u = u, Q = Q, R = R)
 mshr.vtk_save(vtk)
 
