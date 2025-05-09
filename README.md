@@ -349,6 +349,27 @@ for _ = 1:10 # 10 iterations
 end
 ```
 
+To run an implicit solution on a GPU, one may use the `conv_to_backend` and
+`conv_from_backend` converter arguments on the solver constructor:
+
+```julia
+solver = ibm.NKSolver(
+    domains...;
+    conv_to_backend = x -> CuArray(x),
+    conv_from_backend = x -> Array(x)
+) do dom, u, ν
+    # res. calculation with no
+    # explicit domain or argument conversions
+end
+
+ν = fill(2.0, length(msh))
+u = zeros(length(msh))
+
+for _ = 1:10 # 10 iterations
+    u .+= solver(u, ν)
+end
+```
+
 ### CFD utilities
 
 For easier implementation of CFD codes, you may use the module `ImmersedBoundary.CFD`. Check the docstrings for the following functions:

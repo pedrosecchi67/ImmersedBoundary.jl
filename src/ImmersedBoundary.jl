@@ -889,9 +889,9 @@ module ImmersedBoundary
     struct BatchResidual
         f
         subdomains::AbstractVector{Domain}
-        indices::AbstractVector{Vector{Int64}}
-        interiors::AbstractVector{Vector{Int64}}
-        fringes::AbstractVector{Vector{Int64}}
+        indices::AbstractVector{AbstractVector{Int64}}
+        interiors::AbstractVector{AbstractVector{Int64}}
+        fringes::AbstractVector{AbstractVector{Int64}}
         n_output::Int64
     end
 
@@ -1058,6 +1058,17 @@ module ImmersedBoundary
     end
 
     """
+    $TYPEDSIGNATURES
+
+    Transport domain and fringe/interior info for a given mesh partition
+    to a given backend.
+    """
+    function part_to_backend!(br::BatchResidual, i::Int64, converter)
+        br.subdomains[i] = to_backend(br.subdomains[i], converter)
+        br.fringes[i] = to_backend(br.fringes[i], converter)
+    end
+
+    """
     $TYPEDFIELDS
 
     Struct to define a multigrid Newton-Krylov (GMRES) solver
@@ -1067,16 +1078,28 @@ module ImmersedBoundary
         batch_residuals::Vector{BatchResidual}
         coarseners::Vector{Accumulator}
         prolongators::Vector{Accumulator}
+        conv_to_backend
+        conv_from_backend
     end
 
     """
     $TYPEDSIGNATURES
 
     Constructor for a Newton-Krylov solver.
+
+    Converters may be provided to bring arrays to and from custom backends.
+    An example is:
+
+    ```
+    conv_to_backend = x -> cu(x)
+    conv_from_backend = x -> Array(x)
+    ```
     """
     function NKSolver(
         f, domains::Domain...;
         max_size::Int64 = 1000000,
+        conv_to_backend = nothing,
+        conv_from_backend = nothing,
     )
         domains = collect(domains)
 
@@ -1097,11 +1120,62 @@ module ImmersedBoundary
             )
         end
 
-        NKSolver(batch_residuals, coarseners, prolongators)
+        NKSolver(
+            batch_residuals, coarseners, prolongators,
+            conv_to_backend, conv_from_backend
+        )
     end
 
     include("gmres.jl")
     import .GMRES
+
+    """
+    $TYPEDSIGNATURES
+
+    Use GMRES on a given partition of a batch residual struct and
+    return the ensueing correction array.
+    """
+    function batch_NK(
+        bf::BatchResidual, i::Int64, Q::AbstractArray, args::AbstractArray...;
+        h::Real = 0.0,
+        r = nothing,
+        n_iter::Int64 = 10,
+        conv_to_backend = nothing,
+        conv_from_backend = nothing,
+        kwargs...
+    )
+        if !isnothing(conv_to_backend)
+            part_to_backend!(bf, i, conv_to_backend)
+            Q = to_backend(Q, conv_to_backend)
+            args = map(
+                a -> to_backend(a, conv_to_backend), args
+            )
+            if !isnothing(r)
+                r = to_backend(r, conv_to_backend)
+            end
+        end
+
+        fringe = bf.fringes[i]
+
+        A, b = GMRES.Linearization(
+            q -> bf(i, q, args...; kwargs...),
+            Q; h = h
+        )
+
+        if !isnothing(r)
+            b .= r
+        end
+        selectdim(b, ndims(b), fringe) .= 0.0
+
+        ps, _ = GMRES.gmres(A, b, n_iter)
+
+        if !isnothing(conv_from_backend)
+            part_to_backend!(bf, i, conv_from_backend)
+            ps = to_backend(ps, conv_from_backend)
+        end
+
+        ps
+    end
 
     """
     $TYPEDSIGNATURES
@@ -1114,34 +1188,35 @@ module ImmersedBoundary
         h::Real = 0.0,
         r = nothing,
         n_iter::Int64 = 10,
+        conv_to_backend = nothing,
+        conv_from_backend = nothing,
         kwargs...
     )
         s = similar(Q)
         s .= 0.0
 
-        for (i, (inds, fringe)) in zip(
-            bf.indices, bf.fringes
-        ) |> enumerate
+        for (i, inds) in enumerate(
+            bf.indices
+        )
             pQ = selectdim(Q, ndims(Q), inds) |> copy
             pargs = map(
                 a -> selectdim(a, ndims(a), inds) |> copy,
                 args
             )
-
-            A, b = GMRES.Linearization(
-                pq -> bf(i, pq, pargs...; kwargs...),
-                pQ; h = h
+            pr = (
+                isnothing(r) ?
+                nothing :
+                selectdim(r, ndims(r), inds) |> copy
             )
 
-            if !isnothing(r) # prescribed residuals from previous iteration
-                b .= selectdim(r, ndims(r), inds)
-            end
-            selectdim(b, ndims(b), fringe) .= 0.0 # set Dirichlet 0 BC
-            # at batch fringes
+            pps = batch_NK(bf, i, pQ, pargs...;
+                h = h, n_iter = n_iter,
+                r = pr, 
+                conv_from_backend = conv_from_backend,
+                conv_to_backend = conv_to_backend,
+                kwargs...)
 
             ps = selectdim(s, ndims(s), inds)
-            pps, _ = GMRES.gmres(A, b, n_iter)
-
             ps .+= pps
         end
 
@@ -1161,6 +1236,8 @@ module ImmersedBoundary
         bfs::AbstractVector{BatchResidual} = [],
         coarseners::AbstractVector{Accumulator} = [],
         prolongators::AbstractVector{Accumulator} = [],
+        conv_to_backend = nothing,
+        conv_from_backend = nothing,
         h::Real = 0.0,
         n_iter::Int64 = 10,
         r = nothing,
@@ -1200,6 +1277,8 @@ module ImmersedBoundary
         s = batch_NK(bf, Q, args...; 
             r = b,
             h = h, n_iter = n_iter,
+            conv_to_backend = conv_to_backend, 
+            conv_from_backend = conv_from_backend,
             kwargs...)
 
         s .+= ds
@@ -1261,6 +1340,8 @@ module ImmersedBoundary
         bfs = solver.batch_residuals,
         coarseners = solver.coarseners,
         prolongators = solver.prolongators,
+        conv_to_backend = solver.conv_to_backend,
+        conv_from_backend = solver.conv_from_backend,
         h = h,
         n_iter = n_iter,
         kwargs...
