@@ -1047,6 +1047,23 @@ module ImmersedBoundary
         conv_from_backend = nothing,
         kwargs...
     )
+        if length(resd.subdomains) == 1
+            if !isnothing(conv_to_backend)
+                args = map(a -> to_backend(a, conv_to_backend), args)
+                part_to_backend!(resd, 1, conv_to_backend)
+            end
+
+            dmn = resd.subdomains[1]
+            R = resd.f(dmn, args...; kwargs...)
+
+            if !isnothing(conv_from_backend)
+                R = to_backend(R, conv_from_backend)
+                part_to_backend!(resd, 1, conv_from_backend)
+            end
+
+            return R
+        end
+
         nc = resd.n_output
 
         R = nothing
@@ -1060,7 +1077,7 @@ module ImmersedBoundary
 
             if !isnothing(conv_to_backend)
                 pargs = map(
-                    a -> to_backend(a, conv_to_backend), args
+                    a -> to_backend(a, conv_to_backend), pargs
                 )
                 part_to_backend!(resd, ipart, conv_to_backend)
             end
@@ -1209,6 +1226,15 @@ module ImmersedBoundary
         conv_from_backend = nothing,
         kwargs...
     )
+        if length(bf.subdomains) == 1
+            return batch_NK(bf, 1, Q, args...;
+                h = h, n_iter = n_iter,
+                r = r,
+                conv_to_backend = conv_to_backend,
+                conv_from_backend = conv_from_backend,
+                kwargs...)
+        end
+
         s = similar(Q)
         s .= 0.0
 

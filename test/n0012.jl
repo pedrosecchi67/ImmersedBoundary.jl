@@ -52,7 +52,7 @@ Q = zeros(2, length(msh))
 Q[1, :] .= 1.0
 R = residual(Q)
 
-solver = ibm.NKSolver(domains...) do dom, u, ν
+solver = ibm.NKSolver(domains...; max_size = 10000) do dom, u, ν
     uavg = (
         dom(u, -1, 0) .+ dom(u, 1, 0) .+ dom(u, 0, -1) .+ dom(u, 0, 1)
     ) ./ 4

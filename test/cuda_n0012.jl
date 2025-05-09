@@ -56,7 +56,8 @@ R = residual(Q)
 solver = ibm.NKSolver(
     domains...;
     conv_to_backend = CuArray,
-    conv_from_backend = Array
+    conv_from_backend = Array,
+    max_size = 10000
 ) do dom, u, ν
     uavg = (
         dom(u, -1, 0) .+ dom(u, 1, 0) .+ dom(u, 0, -1) .+ dom(u, 0, 1)
