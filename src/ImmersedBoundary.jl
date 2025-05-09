@@ -1024,13 +1024,29 @@ module ImmersedBoundary
 
     """
     $TYPEDSIGNATURES
+
+    Transport domain and fringe/interior info for a given mesh partition
+    to a given backend.
+    """
+    function part_to_backend!(br::BatchResidual, i::Int64, converter)
+        br.subdomains[i] = to_backend(br.subdomains[i], converter)
+        br.fringes[i] = to_backend(br.fringes[i], converter)
+    end
+
+    """
+    $TYPEDSIGNATURES
     
     Run residual evaluation given input array. The last dimension must identify
     cell indices.
 
     Kwargs are passed on to residual function.
     """
-    function (resd::BatchResidual)(args::AbstractArray...; kwargs...)
+    function (resd::BatchResidual)(
+        args::AbstractArray...; 
+        conv_to_backend = nothing,
+        conv_from_backend = nothing,
+        kwargs...
+    )
         nc = resd.n_output
 
         R = nothing
@@ -1042,7 +1058,19 @@ module ImmersedBoundary
                 args
             )
 
+            if !isnothing(conv_to_backend)
+                pargs = map(
+                    a -> to_backend(a, conv_to_backend), args
+                )
+                part_to_backend!(resd, ipart, conv_to_backend)
+            end
+
             r = resd(ipart, pargs...; kwargs...)
+
+            if !isnothing(conv_from_backend)
+                part_to_backend!(resd, ipart, conv_from_backend)
+                r = to_backend(r, conv_from_backend)
+            end
 
             if isnothing(R) # define return array
                 R = similar(
@@ -1055,17 +1083,6 @@ module ImmersedBoundary
         end
 
         R
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Transport domain and fringe/interior info for a given mesh partition
-    to a given backend.
-    """
-    function part_to_backend!(br::BatchResidual, i::Int64, converter)
-        br.subdomains[i] = to_backend(br.subdomains[i], converter)
-        br.fringes[i] = to_backend(br.fringes[i], converter)
     end
 
     """
@@ -1246,7 +1263,12 @@ module ImmersedBoundary
         bf = bfs[1]
 
         A, b = GMRES.Linearization(
-            q -> bf(q, args...; kwargs...),
+            q -> bf(
+                q, args...; 
+                conv_to_backend = conv_to_backend,
+                conv_from_backend = conv_from_backend,
+                kwargs...
+            ),
             Q; h = h,
         )
 
@@ -1264,6 +1286,8 @@ module ImmersedBoundary
                 bfs = bfs[2:end],
                 coarseners = coarseners[2:end],
                 prolongators = prolongators[2:end],
+                conv_to_backend = conv_to_backend,
+                conv_from_backend = conv_from_backend,
                 h = h,
                 r = coars(b),
                 n_iter = n_iter,
