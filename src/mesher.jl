@@ -914,6 +914,29 @@ module Mesher
                 parts = new_parts
             end
 
+            # now, let's merge partitions until they reach at most max_size cells
+            lengths = length.(parts)
+
+            new_parts = [Int64[]]
+            new_part_length = 0
+            for ip in sortperm(lengths)
+                if new_part_length + lengths[ip] > max_size
+                    new_part_length = 0
+                    push!(new_parts, Int64[])
+                end
+
+                new_part_length += lengths[ip]
+                push!(new_parts[end], ip)
+            end
+
+            parts = [
+                (
+                    length(ps) == 1 ?
+                    parts[ps[1]] : 
+                    reduce(vcat, parts[ps])
+                ) for ps in new_parts
+            ]
+
             parts
         end
 

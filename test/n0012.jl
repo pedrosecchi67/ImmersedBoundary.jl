@@ -92,6 +92,6 @@ u = intp(u)
 vtk = mshr.vtk_grid("n0012_coarse", meshes[end]; u = u)
 mshr.vtk_save(vtk)
 
-sub = residual.subdomains[15]
+sub = residual.subdomains[5]
 vtk = mshr.vtk_grid("n0012_subdomain", sub.mesh)
 mshr.vtk_save(vtk)
