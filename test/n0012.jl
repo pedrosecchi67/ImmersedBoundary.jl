@@ -74,7 +74,7 @@ end
 u = zeros(length(msh))
 
 for _ = 1:10 # 10 iterations
-    u .+= solver(u, ν)
+    @time u .+= solver(u, ν)
 end
 
 surf = ibm.Surface(dmn, "wall")
