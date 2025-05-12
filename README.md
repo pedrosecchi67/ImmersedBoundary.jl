@@ -356,7 +356,8 @@ To run an implicit solution on a GPU, one may use the `conv_to_backend` and
 solver = ibm.NKSolver(
     domains...;
     conv_to_backend = x -> CuArray(x),
-    conv_from_backend = x -> Array(x)
+    conv_from_backend = x -> Array(x),
+    max_size = 1000_000 # limit batch size for GPU
 ) do dom, u, ν
     # res. calculation with no
     # explicit domain or argument conversions

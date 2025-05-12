@@ -1131,7 +1131,7 @@ module ImmersedBoundary
     """
     function NKSolver(
         f, domains::Domain...;
-        max_size::Int64 = 1000000,
+        max_size::Int64 = 1000_000_000,
         conv_to_backend = nothing,
         conv_from_backend = nothing,
     )
