@@ -383,7 +383,7 @@ For easier implementation of CFD codes, you may use the module `ImmersedBoundary
 ?ibm.CFD.primitive2state
 ?ibm.CFD.rms
 ?ibm.CFD.HLL
-?ibm.JSTKE
+?ibm.CFD.JSTKE
 ?ibm.GMRES.Linearization
 ?ibm.GMRES.gmres
 ```

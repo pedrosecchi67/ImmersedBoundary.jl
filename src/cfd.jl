@@ -163,7 +163,6 @@ module CFD
 
     end
 
-    #=
     _Mplus(M::Real) = (
         abs(M) > 1.0 ?
         max(M, 0.0) :
@@ -230,7 +229,6 @@ module CFD
         F
 
     end
-    =#
 
     """
     $TYPEDSIGNATURES
