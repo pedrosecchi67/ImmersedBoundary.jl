@@ -1,8 +1,8 @@
 module GMRES
 
-    using DocStringExtensions
+    using ..DocStringExtensions
 
-    using LinearAlgebra
+    using ..LinearAlgebra
 
     export Linearization, gmres
 
@@ -106,6 +106,8 @@ module GMRES
         A, b::AbstractArray, n_iter::Int64;
         preconditioner = x -> x,
     )
+		    n_iter = min(length(b), n_iter) # just in case, clip iterations to number of DOFs
+    
         ϵ = eltype(b) |> eps
 
         V = []

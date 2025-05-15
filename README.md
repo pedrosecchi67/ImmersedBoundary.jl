@@ -385,6 +385,7 @@ For easier implementation of CFD codes, you may use the module `ImmersedBoundary
 ?ibm.CFD.HLL
 ?ibm.CFD.AUSM
 ?ibm.CFD.JSTKE
+?ibm.CFD.pressure_coefficient
 ?ibm.GMRES.Linearization
 ?ibm.GMRES.gmres
 ```
