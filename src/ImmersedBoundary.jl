@@ -1302,14 +1302,7 @@ module ImmersedBoundary
             b .= r
         end
 
-        s = batch_NK(bf, Q, args...; 
-            r = b,
-            h = h, n_iter = n_iter,
-            conv_to_backend = conv_to_backend, 
-            conv_from_backend = conv_from_backend,
-            kwargs...)
-        b .-= A(s)
-
+        ds = 0.0
         if length(coarseners) > 0
             coars = coarseners[1]
             prolong = prolongators[1]
@@ -1329,11 +1322,9 @@ module ImmersedBoundary
 
             ds = prolong(sc)
             b .-= A(ds)
-
-            s .+= ds
         end
 
-        ds = batch_NK(bf, Q, args...; 
+        s = batch_NK(bf, Q, args...; 
             r = b,
             h = h, n_iter = n_iter,
             conv_to_backend = conv_to_backend, 
