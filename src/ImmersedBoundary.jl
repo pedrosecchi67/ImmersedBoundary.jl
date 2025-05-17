@@ -1288,18 +1288,16 @@ module ImmersedBoundary
     )
         bf = bfs[1]
 
-        A, b = GMRES.Linearization(
-            q -> bf(
-                q, args...; 
+        b = nothing
+        if isnothing(r)
+            b = - bf(
+                Q, args...; 
                 conv_to_backend = conv_to_backend,
                 conv_from_backend = conv_from_backend,
                 kwargs...
-            ),
-            Q; h = h,
-        )
-
-        if !isnothing(r)
-            b .= r
+            )
+        else
+            b = r
         end
 
         ds = 0.0
@@ -1321,11 +1319,10 @@ module ImmersedBoundary
             )
 
             ds = prolong(sc)
-            b .-= A(ds)
         end
+        b = nothing # allow for deallocation if necessary
 
-        s = batch_NK(bf, Q, args...; 
-            r = b,
+        s = batch_NK(bf, Q .+ ds, args...; 
             h = h, n_iter = n_iter,
             conv_to_backend = conv_to_backend, 
             conv_from_backend = conv_from_backend,
