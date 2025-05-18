@@ -371,6 +371,22 @@ for _ = 1:10 # 10 iterations
 end
 ```
 
+### Coupled equations
+
+To avoid wasting memory when solving for another equation within the same domain,
+you may use `similar` to build new `BatchResidual` or `NKSolver` structs
+without reallocating domain partitioning or multigrid info:
+
+```julia
+batch_residual = similar(batch_residual) do dom, args...
+    # do stuff
+end
+
+nksolver = similar(nksolver) do dom, args...
+    # do stuff
+end
+```
+
 ### CFD utilities
 
 For easier implementation of CFD codes, you may use the module `ImmersedBoundary.CFD`. Check the docstrings for the following functions:

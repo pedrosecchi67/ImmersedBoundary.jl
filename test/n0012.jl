@@ -77,6 +77,28 @@ for _ = 1:10 # 10 iterations
     @time u .+= solver(u, ν)
 end
 
+solver = similar(solver) do dom, u, ν
+    uavg = (
+        dom(u, -1, 0) .+ dom(u, 1, 0) .+ dom(u, 0, -1) .+ dom(u, 0, 1)
+    ) ./ 4
+
+    ibm.impose_bc!(dom, "wall", uavg) do bdry, ui
+        ub = similar(ui)
+        ub .= 1.0
+
+        ub
+    end
+    ibm.impose_bc!(dom, "farfield", uavg) do bdry, ui
+        ui .* 0.0
+    end
+
+    (uavg .- u) .* ν
+end
+
+for _ = 1:10 # 10 iterations
+    @time u .+= solver(u, ν)
+end
+
 surf = ibm.Surface(dmn, "wall")
 
 vtk = ibm.surf2vtk("n0012_surf", surf; u = u)

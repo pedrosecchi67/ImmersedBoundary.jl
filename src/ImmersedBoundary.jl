@@ -898,6 +898,16 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
+    Obtain clone of batch residual struct with new function pointing to the same mesh
+    """
+    Base.similar(f, bf::BatchResidual) = BatchResidual(
+        f,
+        bf.subdomains, bf.indices, bf.interiors, bf.fringes, bf.n_output
+    )
+
+    """
+    $TYPEDSIGNATURES
+
     Define residual operator.
 
     Splits the domain into sub-domains of at most `max_size` cells
@@ -1115,6 +1125,17 @@ module ImmersedBoundary
         conv_to_backend
         conv_from_backend
     end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain clone of `NKSolver` struct with new function pointing to the same mesh
+    """
+    Base.similar(f, nk::NKSolver) = NKSolver(
+        map(
+            bf -> similar(f, bf), nk.batch_residuals
+        ), nk.coarseners, nk.prolongators, nk.conv_to_backend, nk.conv_from_backend
+    )
 
     """
     $TYPEDSIGNATURES
