@@ -707,11 +707,12 @@ module Mesher
         $TYPEDSIGNATURES
 
         Obtain multiple meshes for a multigrid approach, returned from finest to coarsest.
-        The element size ratio between meshes is 2.
+        The element size ratio between meshes is `2 ^ coarsening_levels`.
 
         All arguments and kwargs are passed to `FixedMesh`.
         """
         Multigrid(ngrids::Int64, args...; 
+            coarsening_levels::Int64 = 1,
             verbose::Bool = false, kwargs...) = map(
             level -> begin
                 if verbose
@@ -719,7 +720,8 @@ module Mesher
                 end
 
                 FixedMesh(args...; kwargs..., 
-                    _mgrid_depth = level - 1, verbose = verbose)
+                    _mgrid_depth = (level - 1) * coarsening_levels, 
+                    verbose = verbose)
             end,
             1:ngrids
         )
