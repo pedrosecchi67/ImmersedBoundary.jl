@@ -52,6 +52,11 @@ Q = zeros(2, length(msh))
 Q[1, :] .= 1.0
 R = residual(Q)
 
+@info "Timing residual"
+for _ = 1:10
+    @time residual(Q)
+end
+
 solver = ibm.NKSolver(domains...; max_size = 10000) do dom, u, ν
     uavg = (
         dom(u, -1, 0) .+ dom(u, 1, 0) .+ dom(u, 0, -1) .+ dom(u, 0, 1)
@@ -73,6 +78,7 @@ end
 ν = fill(2.0, length(msh))
 u = zeros(length(msh))
 
+@info "Timing solver"
 for _ = 1:10 # 10 iterations
     @time u .+= solver(u, ν)
 end

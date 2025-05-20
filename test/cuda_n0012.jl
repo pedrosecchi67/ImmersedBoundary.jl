@@ -53,6 +53,11 @@ Q = zeros(2, length(msh))
 Q[1, :] .= 1.0
 R = residual(Q)
 
+@info "Timing residual"
+for _ = 1:10
+    @time residual(Q)
+end
+
 solver = ibm.NKSolver(
     domains...;
     conv_to_backend = CuArray,
@@ -79,6 +84,7 @@ end
 ν = fill(2.0, length(msh))
 u = zeros(length(msh))
 
+@info "Timing solver"
 for _ = 1:10 # 10 iterations
     @time u .+= solver(u, ν)
 end
