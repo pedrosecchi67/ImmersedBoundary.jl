@@ -14,11 +14,11 @@ module ImmersedBoundary
     Struct to hold an interpolator from mesh points
     """
     struct Interpolator
-        n_outputs::Int64
-        fetch_to::AbstractVector{Int64}
-        fetch_from::AbstractVector{Int64}
-        interpolate_to::AbstractVector{Int64}
-        stencils::AbstractMatrix{Int64}
+        n_outputs::Int32
+        fetch_to::AbstractVector{Int32}
+        fetch_from::AbstractVector{Int32}
+        interpolate_to::AbstractVector{Int32}
+        stencils::AbstractMatrix{Int32}
         weights::AbstractMatrix{Float64}
     end
 
@@ -42,9 +42,9 @@ module ImmersedBoundary
 
         if n_outputs == 0
             return Interpolator(
-                0, Int64[], Int64[], 
-                Int64[], 
-                Matrix{Int64}(undef, kneighs, 0), Matrix{Float64}(undef, kneighs, 0)
+                0, Int32[], Int32[], 
+                Int32[], 
+                Matrix{Int32}(undef, kneighs, 0), Matrix{Float64}(undef, kneighs, 0)
             )
         end
 
@@ -146,7 +146,7 @@ module ImmersedBoundary
     All other properties are defined for ghost cells only, however.
     """
     struct Boundary 
-        ghost_indices::AbstractVector{Int64}
+        ghost_indices::AbstractVector{Int32}
         distances::AbstractVector{Float64}
         image_distances::AbstractVector{Float64}
         normals::AbstractMatrix{Float64}
@@ -743,8 +743,8 @@ module ImmersedBoundary
     Struct to accumulate values over variable-length stencils
     """
     struct Accumulator
-        n_output::Int64
-        stencils::Dict{Int64, Tuple}
+        n_output::Int32
+        stencils::Dict{Int32, Tuple}
     end
 
     """
@@ -771,7 +771,7 @@ module ImmersedBoundary
     )
         ls = length.(inds)
 
-        d = Dict{Int64, Tuple}()
+        d = Dict{Int32, Tuple}()
         for l in unique(ls)
             isval = (ls .== l) |> findall
 
@@ -889,10 +889,10 @@ module ImmersedBoundary
     struct BatchResidual
         f
         subdomains::AbstractVector{Domain}
-        indices::AbstractVector{AbstractVector{Int64}}
-        interiors::AbstractVector{AbstractVector{Int64}}
-        fringes::AbstractVector{AbstractVector{Int64}}
-        n_output::Int64
+        indices::AbstractVector{AbstractVector{Int32}}
+        interiors::AbstractVector{AbstractVector{Int32}}
+        fringes::AbstractVector{AbstractVector{Int32}}
+        n_output::Int32
     end
 
     """
@@ -954,13 +954,13 @@ module ImmersedBoundary
         subdomains = [domain]
         indices = [collect(1:nc)]
         interiors = [collect(1:nc)]
-        fringes = [Int64[]]
+        fringes = [Int32[]]
         if nc > max_size
             indices = Mesher.partition(domain.mesh, max_size; 
                 fringe = true, include_empty = true)
 
-            fringes = Vector{Int64}[]
-            interiors = Vector{Int64}[]
+            fringes = Vector{Int32}[]
+            interiors = Vector{Int32}[]
             is_fringe = falses(nc)
             for (inds, nofringe) in zip(
                 indices,

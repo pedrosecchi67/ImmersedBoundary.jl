@@ -371,6 +371,8 @@ for _ = 1:10 # 10 iterations
 end
 ```
 
+> Note that, when running a solution on a partitioned domain (i. e. using `max_size`), it is advised to use `domains` only in a limited scope, and mantain only `NKSolver` allocated once all surfaces are created and the solver is defined. When partitioning the domain, `NKSolver` allocates a copy of each part of the mesh and its due data structures, which may increase memory usage.
+
 ### Coupled equations
 
 To avoid wasting memory when solving for another equation within the same domain,
