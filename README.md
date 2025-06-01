@@ -62,6 +62,23 @@ stl = cat(circle, airfoil)
 
 A building-cubes mesh may be defined with:
 
+```julia
+function Domain(
+        origin::Vector{Float64}, widths::Vector{Float64},
+        surfaces::Tuple{String, Stereolitography, Float64}...;
+        margin::Int64 = 2,
+        block_sizes::Union{Tuple, Int} = 8,
+        refinement_regions::AbstractVector = [],
+        max_length::Float64 = Inf,
+        ghost_layer_ratio::Tuple = (-2.1, 2.1),
+        interior_point = nothing,
+        approximation_ratio::Float64 = 2.0,
+        verbose::Bool = false,
+        max_partition_blocks::Int64 = 1000,
+        families = nothing,
+)
+```
+
 * A hypercube origin;
 * A vector of hypercube widths;
 * A set of tuples in format `(name, surface, max_length)` describing
