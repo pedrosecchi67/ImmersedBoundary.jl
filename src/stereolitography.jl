@@ -216,7 +216,8 @@ module STLHandler
     """
     function stl2vtk(
         fname::String,
-        surf::Stereolitography;
+        surf::Stereolitography,
+        vtm_file = nothing;
         kwargs...
     )   
        
@@ -233,9 +234,16 @@ module STLHandler
             eachcol(surf.simplices)
         )
                 
-        grid = vtk_grid(
-            fname, pts, cells
-        )
+        grid = nothing
+        if isnothing(vtm_file)
+            grid = vtk_grid(
+                fname, pts, cells
+            )
+        else
+            grid = vtk_grid(
+                vtm_file, fname, pts, cells
+            )
+        end
          
         for (vname, u) in kwargs
             grid[String(vname)] = u

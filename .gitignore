@@ -28,3 +28,7 @@ Manifest.toml
 *.vtk
 *.vtm
 *.vtr
+*.vti
+
+# meshes
+*.ibm
