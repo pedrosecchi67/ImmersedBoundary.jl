@@ -145,7 +145,9 @@ Or used to build VTK output:
 u = rand(length(dom)) 
 v = rand(length(dom), 2) 
 
-ibm.export_vtk("results", dom; u = u, v = v)
+ibm.export_vtk("results", dom; 
+    include_volume = true, include_surface = true,
+    u = u, v = v)
 ```
 
 Arrays can be passed as kwargs to record cell data. The first dimension is assumed to refer to the cell index.
@@ -284,6 +286,28 @@ dom(u, v) do part, udom, vdom
 
     ibm.update_partition!(part, uvom, U)
 end
+```
+
+### Wall distances
+
+Wall distances for family `"wall"` may be accessed with:
+
+```julia
+signed_distance = dom.boundary_distances["wall"]
+```
+
+### Surfaces and postprocessing
+
+Surfaces may be used for postprocessing and coefficient integration. Example:
+
+```julia
+surf = dom.surfaces["wall"]
+
+Cp_wall = surf(Cp) # interpolate array of field properties to wall
+
+CX, CY = ibm.surface_integral(
+    surf, Cp_wall .* surf.normals
+)
 ```
 
 ### Multigrid
