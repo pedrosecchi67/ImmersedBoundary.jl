@@ -14,20 +14,22 @@ Pkg.add("https://github.com/pedrosecchi67/ImmersedBoundary.jl.git")
 
 Basic usage instructions are included below. **Please refer to the docstrings of each function for additional arguments and definitions**.
 
-For a more in-depth technical explanation of the package, please refer to docs/theory.pdf.
+For a more in-depth theoretical explanation of the package, please refer to docs/theory.pdf.
+
+**Note that all functions below work in both 2D and 3D.**
 
 ### Stereolitography objects
 
-Solid boundaries are described by Stereolitography input:
+Stereolitography objects can be used to describe surfaces:
 
 ```julia
 import ImmersedBoundary as ibm
-import ImmersedBoundary.Mesher as mshr
 
-sphere = mshr.Stereolitography("sphere.stl")
+# binary or ASCII:
+sphere = ibm.Stereolitography("sphere.stl")
 
 # Selig format .dat file with no header:
-airfoil = mshr.Stereolitography("rae2822.dat")
+airfoil = ibm.Stereolitography("rae2822.dat")
 
 circle = let theta = LinRange(0.0, 2pi, 100) |> collect
     points = [
@@ -35,9 +37,10 @@ circle = let theta = LinRange(0.0, 2pi, 100) |> collect
         sin.(theta)'
     ]
 
-    mshr.Stereolitography(points; closed = true)
+    ibm.Stereolitography(points; closed = true)
 end
 
+# same, but with defined simplex corner indices:
 circle = let theta = LinRange(0.0, 2pi, 100) |> collect
     points = [
         cos.(theta[1:(end - 1)])';
@@ -48,66 +51,54 @@ circle = let theta = LinRange(0.0, 2pi, 100) |> collect
         circshift(collect(1:length(theta)), -1)'
     ]
 
-    mshr.Stereolitography(points, indices)
+    ibm.Stereolitography(points, indices)
 end
 
 # concatenate two STLs:
 stl = cat(circle, airfoil)
 ```
 
-### Mesh generation
+### Mesh/domain definition
 
-Fixed octree mesh generation can be done with:
-
-```julia
-    function FixedMesh(
-            origin::Vector{Float64}, widths::Vector{Float64},
-            surfaces::Tuple{String, Stereolitography, Float64}...;
-            refinement_regions::AbstractVector = [],
-            growth_ratio::Float64 = 1.2,
-            max_length::Float64 = Inf,
-            ghost_layer_ratio::Float64 = -2.2,
-            interior_point = nothing,
-            approximation_ratio::Float64 = 2.0,
-            filter_triangles_every::Int64 = 0,
-            verbose::Bool = false,
-            farfield_boundaries = nothing,
-    )
-```
+A building-cubes mesh may be defined with:
 
 * A hypercube origin;
 * A vector of hypercube widths;
 * A set of tuples in format `(name, surface, max_length)` describing
     stereolitography surfaces (`Mesher.Stereolitography`) and 
     the max. cell widths at these surfaces;
+* A "margin" of cells for each block, used for inter-block communication;
+* A block size, in the form of a tuple with number of cells along each axis, or
+    an integer with the same number for all axes;
 * A set of refinement regions described by distance functions and
     the local refinement at each region. Example:
-
-```julia
-refinement_regions = [
-    Mesher.Ball([0.0, 0.0], 0.1) => 0.005,
-    Mesher.Ball([1.0, 0.0], 0.1) => 0.005,
-    Mesher.Box([-1.0, -1.0], [3.0, 2.0]) => 0.0025,
-    Mesher.Line([1.0, 0.0], [2.0, 0.0]) => 0.005
-]
-```
-
-* A cell growth ratio;
+        ```julia
+        refinement_regions = [
+            ibm.Ball([0.0, 0.0], 0.1) => 0.005,
+            ibm.Ball([1.0, 0.0], 0.1) => 0.005,
+            ibm.Box([-1.0, -1.0], [3.0, 2.0]) => 0.0025,
+            ibm.Line([1.0, 0.0], [2.0, 0.0]) => 0.005
+        ]
+        ```
 * A maximum cell size (optional);
-* A ratio between the cell circumradius and the SDF threshold past which
-    cells are considered to be out of the domain. `ghost_layer_ratio = -2.0` 
-    guarantees that a layer of at least two ghost cell layers are included 
-    within each solid;
+* An interval of ratios between the cell circumradius and the SDF of a given surface for 
+    which cells are defined as ghosts;
 * A point reference within the domain. If absent, external flow is assumed;
 * An approximation ratio between wall distance and cell circumradius past which
-    distance functions are approximated;
-* A number of recursive refinement levels past which the triangles in the provided
-    triangulations are filtered to lighter, local topologies.
+    distance functions are approximated; 
+* A maximum number of octree blocks per partition; and
+* A set of families defining surface groups for postprocessing, BC imposition and wall
+    distance calculations.
 
-Farfield boundaries may be defined with the following syntax:
+The families may be defined with the following syntax:
 
 ```julia
-farfield_boundaries = [
+surfaces = [
+    ("wing", "wing.stl", 1e-3),
+    ("flap", "flap.stl", 1e-3)
+]
+families = [
+    "wall" => ["wing", "flap"], # a group of surface names
     "inlet" => [
         (1, false), # fwd face, first dimension (x)
         (2, false), # left face, second dimension (y)
@@ -117,276 +108,187 @@ farfield_boundaries = [
     ],
     "outlet" => [(1, true)]
 ]
+
+dom = ibm.Domain(origin, widths, surfaces...; families = families)
 ```
 
-Meshes can be saved to JSON format files:
+The default family definition uses each surface as a family and defines
+the farfield as `"FARFIELD"`.
+
+Meshes can be saved to binary (serialized) files:
 
 ```julia
-mshr.mesh2json("mesh.json", msh)
-msh = mshr.json2mesh("mesh.json")
+ibm.save_domain("domain.ibm", dom)
+dom = ibm.load_domain("domain.ibm")
 ```
 
 Or used to build VTK output:
 
 ```julia
-u = rand(length(msh)) 
-v = rand(2, length(msh)) 
+u = rand(length(dom)) 
+v = rand(length(dom), 2) 
 
-vtk = mshr.mesh2vtk("results", msh; u = u, v = v)
-mshr.vtk_save(vtk)
+ibm.export_vtk("results", dom; u = u, v = v)
 ```
 
-Arrays can be passed as kwargs to record cell data. The last dimension is assumed to refer to the cell index.
+Arrays can be passed as kwargs to record cell data. The first dimension is assumed to refer to the cell index.
 
-### Domain definition
+### Partitioned residual computing
 
-To define a PDE domain from a mesh, you can simply use:
+ImmersedBoundary.jl implements mesh paritioning to ensure that only a bunch of blocks in the building-cubes mesh has its residuals evaluated concurrently, thus saving on the amount of RAM used at any given time. This also allows for easier GPU parallelization, which involves tighter memory limits.
+
+The following example is given:
 
 ```julia
-domain = ibm.Domain(msh)
+domain(r, u) do partition, rdom, udom
+    # udom includes the parts of array `u`
+    # which affect the residual at partition `partition`.
+
+    U = part(udom) # obtain Cartesian representation
+    # of u. Shape (nblocks, nx, ny[, nz])
+    R = part(rdom)
+
+    # now do some Cartesian grid operations and
+    # update R
+
+    ibm.update_partition!(part, rdom, R) # send values to `rdom`
+end
+
+# after the loop, the values of `rdom` are returned to
+# array `r`
 ```
 
-Check out the docstring for tunable hyperparameters regarding ghost points.
-
-### Residual evaluation
-
-To evaluate residuals, one may use stencil points and cell spacing information for the mesh.
-
-For example, with a vector of cell properties $u$, one may find $\partial u/\partial y$ using central differences:
+It's also an option to automatically convert the passed arrays and partition info to a given array backend (e.g. `CuArray`) to perform the residual calculations:
 
 ```julia
-dx, dy = eachrow(
-    domain.widths
-)
-
-du!dy = (
-    domain(u, 0, 1) .- domain(u, 0, -1)
-) ./ (2 .* dy)
-```
-
-These functions also work for multidimensional arrays, so long as the last dimension indicates the cell index.
-
-### Boundary condition imposition
-
-To impose (in-place) the non-penetration condition for a velocity field at boundary `bdry`, one may use:
-
-```julia
-impose_bc!(domain, "wall", u, v) do bdry, ui, vi # boundary struct and values at image points
-    nx, ny = eachrow(bdry.normals)
-
-    un = @. ui * nx + vi * ny
-
-    (
-        ui .- un .* nx,
-        vi .- un .* ny
-    )
+dom(
+    u;
+    conv_to_backend = x -> CuArray(x),
+    conv_from_backend = x -> Array(x)
+) do part, udom
+    @show typeof(udom) # CuArray
 end
 ```
 
-Check `?ibm.Boundary` and `?ibm.impose_bc!` for further information.
+The return values of each function call are also gathered and returned in a vector.
 
-### Surfaces and postprocessing
+### PDE discretization
 
-In this package, the term "surface" is used to identify any triangulated surface for postprocessing purposes, while "boundary" refers to a limit of the numerical domain on which the user may impose boundary conditions.
-
-To create a surface, one may use:
+Cartesian grid operations can be done with `(part::Partition)()` and `ibm.getalong` acting over block-structured arrays:
 
 ```julia
-surf = ibm.Surface(
-    domain, stl
-)
 
-# to refine via tri splitting to reach a given maximum surface element length:
-surf = ibm.Surface(
-    domain, stl, max_length
-)
+u = rand(length(domain))
+ux = similar(u)
 
-# to use a stereolitography object previously employed for boundary definition:
-surf = ibm.Surface(domain, "wall")
-```
+domain(u, ux) do part, udom, uxdom
+    U = part(udom)
+    Ux = part(uxdom)
 
-One may interpolate fluid properties to a surface and use them for integration:
+    dx, dy = part.spacing |> eachcol
 
-```julia
-# "velocity" vector in 2D mesh:
-uv = rand(2, length(domain.mesh))
+    Ux .= (
+        part(U, 1, 0, 0) .- part(U, -1, 0, 0)
+    ) ./ (2 .* dx)
 
-uv_surf = surf(uv)
-Cp = let (u, v) = eachrow(uv_surf)
-    @. 1.0 - u ^ 2 - v ^ 2
+    # equivalent to part(U, 0, 0, 2):
+    Ukp2 = ibm.getalong(part, U, 3, 2)
+
+    ibm.update_partition!(part, uxdom, Ux)
 end
 
-nx, ny = surf.normals |> eachrow # check docstring for other properties
-
-CX = ibm.surface_integral(surf, - nx .* Cp)
-CY = ibm.surface_integral(surf, - ny .* Cp)
+# ux is now the first, x-axis derivative of u
 ```
 
-Surfaces may also be used to generate VTK output:
+### Boundary conditions
+
+BC imposition is performed via ghost cells (check the documentation for further info), each having an image point on the opposite side of the boundary. An example of BC imposition is the following implementation of the non-penetration condition:
 
 ```julia
-vtk = ibm.surf2vtk("surf_output", surf; u = u, v = v) # kwargs as node data
-ibm.vtk_save(vtk)
+dom(u, v) do part, udom, vdom
+    U = part(udom)
+    V = part(vdom)
+
+    ibm.impose_bc!(part, "wall", U, V) do bdry, uimage, vimage
+        nx, ny = bdry.normals |> eachcol
+        un = @. nx * uimage + ny * vimage
+
+        ( # returns values at boundary given values at image point
+            uimage .- un .* nx,
+            vimage .- vn .* ny
+        )
+    end
+
+    ibm.update_partition!(part, udom, U)
+    ibm.update_partition!(part, vdom, V)
+end
+
+
+# alternative return value:
+uv = zeros(length(dom), 2)
+uv[:, 1] .= 1.0
+dom(uv) do part, uvdom
+    UV = part(uvdom)
+    
+    ibm.impose_bc!(part, "wall", UV) do bdry, uvim
+        uimage, vimage = eachcol(uvim)
+        nx, ny = eachcol(bdry.normals)
+        un = @. nx * uimage + ny * vimage
+
+        uvim .- un .* bdry.normals
+    end
+
+    ibm.update_partition!(part, uvdom, UV)
+end
+```
+
+The `Boundary` type struct also includes the following fields:
+
+```julia
+bdry.points # shape (nghosts, ndim): boundary projections of ghost cells
+bdry.normals # shape (nghosts, ndim)
+bdry.image_distances # to wall
+bdry.ghost_distances # to wall
+```
+
+Note that other field variable arrays may be passed to `impose_bc!`, and only the first input arrays will have their values altered as per the returned boundary values. Example:
+
+```julia
+dom(u, v) do part, udom, vdom
+    U = part(udom)
+    V = part(vdom)
+
+    ibm.impose_bc!(part, "boundary", U, V) do bdry, ui, vi
+        # Neumann, du!dn = 2v
+        ubdry = ui .- vi .* 2.0 .* bdry.image_distances
+
+        ubdry
+    end
+
+    ibm.update_partition!(part, uvom, U)
+end
 ```
 
 ### Multigrid
 
-To generate a series of meshes with element size ratios of 2 near the boundary:
+You can use `ibm.block_average` to obtain the average of a block-structured array at each mesh block in the current partition:
 
 ```julia
-m1, m2, m3 = mshr.Multigrid( # from finest to coarsest
-    3, # 3 levels
-    [-L/2,-L/2], [L,L],
-    ("wall", stl, 0.001);
-    verbose = true,
-    farfield_boundaries = [
-        "farfield" => [(1, false), (1, true), (2, false), (2, true)]
-    ],
-    refinement_regions = [
-        mshr.Ball([0.0, 0.0], 0.01) => 0.00025,
-        mshr.Ball([1.0, 0.0], 0.01) => 0.00025,
-    ]
-)
-```
+dom(r, u) do part, rdom, udom
+    U = part(udom)
 
-To interpolate flow properties between domains:
+    # calculate residual R somehow
 
-```julia
-dmn1 = ibm.Domain(m1)
-dmn2 = ibm.Domain(m2)
+    # "coarsen" by taking the average of each mesh block:
+    R .= ibm.block_average(part, R)
 
-intp = ibm.Interpolator(dmn1, dmn2)
+    # rescale time-step by using part.block_size
+    # to obtain a coarse/fine mesh size ratio:
+    R .*= (
+        min(part.block_size...)
+    )
 
-Q1 = rand(length(dmn1.mesh))
-Q2 = intp(Q1)
-```
-
-### GPU/CPU parallelization
-
-Function `to_backend` may be used to convert all arrays to a custom backend, such as that of CUDA.jl:
-
-```julia
-dmn = ibm.to_backend(dmn, CuArray) # domains
-surf = ibm.to_backend(surf, CuArray) # surfaces
-intp = ibm.to_backend(intp, CuArray) # interpolators
-
-# ...and back:
-dmn = ibm.to_backend(dmn, Array)
-```
-
-### Batch residual evaluation
-
-GPUs (and cheap computers!) have tight memory limits, which may make it tricky to evaluate residuals in large meshes.
-
-To mitigate this problem, we provide the `BatchResidual` struct:
-
-```julia
-residual = ibm.BatchResidual(
-    dmn; 
-    max_size = 10000
-) do domain, Q
-    domain = ibm.to_backend(domain, CuArray)
-    Q = CuArray(Q)
-
-    u, v = eachrow(Q)
-
-    ibm.impose_bc!(domain, "wall", u, v) do bdry, U, V
-        nx, ny = eachrow(bdry.normals)
-        un = @. U * nx + V * ny
-
-        (
-            U .- un .* nx,
-            V .- un .* ny
-        )
-    end
-
-    [u'; v'] |> Array
-end
-
-R = residual(Q)
-```
-
-Which creates mesh partitions of, at most, `max_size` cells and calculates the residual at one partition at a time.
-
-Note that this involves transporting small batches of data to and from a GPU, which may be costly with a small `max_size`.
-
-### Newton-Krylov solutions
-
-We also provide utilities for multigrid-accelerated Newton-Krylov solutions using GMRES.
-
-An example is given below, solving for `u` (always the first array input, with its last dimension indicating cell indices) with auxiliary field variable `ν` (similar structure).
-
-Note that kwargs may also be passed to `solver`, being forwarded to the residual function.
-
-```julia
-# domains is a vector of `ibm.Domain` structs corresponding to ever coarser multigrid levels.
-
-n_iter = 10 # number of GMRES iterations
-
-solver = ibm.NKSolver(domains...; n_iter = n_iter) do dom, u, ν
-    uavg = (
-        dom(u, -1, 0) .+ dom(u, 1, 0) .+ dom(u, 0, -1) .+ dom(u, 0, 1)
-    ) ./ 4
-
-    ibm.impose_bc!(dom, "wall", uavg) do bdry, ui
-        ub = similar(ui)
-        ub .= 1.0
-
-        ub
-    end
-    ibm.impose_bc!(dom, "farfield", uavg) do bdry, ui
-        ui .* 0.0
-    end
-
-    (uavg .- u) .* ν
-end
-
-ν = fill(2.0, length(msh))
-u = zeros(length(msh))
-
-for _ = 1:10 # 10 iterations
-    # solver returns approx. linear corrections:
-    u .+= solver(u, ν)
-end
-```
-
-To run an implicit solution on a GPU, one may use the `conv_to_backend` and
-`conv_from_backend` converter arguments on the solver constructor:
-
-```julia
-solver = ibm.NKSolver(
-    domains...;
-    conv_to_backend = x -> CuArray(x),
-    conv_from_backend = x -> Array(x),
-    max_size = 1000_000 # limit batch size for GPU
-) do dom, u, ν
-    # res. calculation with no
-    # explicit domain or argument conversions
-end
-
-ν = fill(2.0, length(msh))
-u = zeros(length(msh))
-
-for _ = 1:10 # 10 iterations
-    u .+= solver(u, ν)
-end
-```
-
-> Note that, when running a solution on a partitioned domain (i. e. using `max_size`), it is advised to use `domains` only in a limited scope, and mantain only `NKSolver` allocated once all surfaces are created and the solver is defined. When partitioning the domain, `NKSolver` allocates a copy of each part of the mesh and its due data structures, which may increase memory usage.
-
-### Coupled equations
-
-To avoid wasting memory when solving for another equation within the same domain,
-you may use `similar` to build new `BatchResidual` or `NKSolver` structs
-without reallocating domain partitioning or multigrid info:
-
-```julia
-batch_residual = similar(batch_residual) do dom, args...
-    # do stuff
-end
-
-nksolver = similar(nksolver) do dom, args...
-    # do stuff
+    ibm.update_partition!(part, rdom, R)
 end
 ```
 
@@ -405,6 +307,4 @@ For easier implementation of CFD codes, you may use the module `ImmersedBoundary
 ?ibm.CFD.AUSM
 ?ibm.CFD.JSTKE
 ?ibm.CFD.pressure_coefficient
-?ibm.GMRES.Linearization
-?ibm.GMRES.gmres
 ```
