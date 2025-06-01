@@ -1,125 +1,64 @@
-import ImmersedBoundary.Mesher as mshr
+@info "Running NACA-0012 mesh and operator test..."
+
 import ImmersedBoundary as ibm
 
-stl = mshr.Stereolitography("n0012.dat")
+stl = ibm.Stereolitography("n0012.dat")
 
 L = 20.0
 
-meshes = mshr.Multigrid(
-    5, 
-    [-L/2,-L/2], [L,L],
+dom = ibm.Domain(
+    [-L/2, -L/2], [L, L],
     ("wall", stl, 0.001);
-    verbose = true,
-    farfield_boundaries = [
-        "farfield" => [(1, false), (1, true), (2, false), (2, true)]
-    ],
     refinement_regions = [
-        mshr.Ball([0.0, 0.0], 0.01) => 0.00025,
-        mshr.Ball([1.0, 0.0], 0.01) => 0.00025,
+        ibm.Ball([0.0, 0.0], 0.0) => 0.00025,
+        ibm.Ball([1.0, 0.0], 0.0) => 0.00025,
     ]
 )
 
-msh = meshes[1]
-domains = ibm.Domain.(meshes)
-dmn = domains[1]
+@info "$(length(dom)) non-blanked, non-margin cells"
 
-x, y = eachrow(dmn.centers)
+dom = ibm.save_domain("dom.ibm", dom)
+dom = ibm.load_domain("dom.ibm")
 
-u = y .+ x .^ 2
-uavg = copy(u)
-for i = 1:4
-    uavg .= ibm.smooth(uavg, dmn)
-end
+uv = zeros(length(dom), 2)
+uv[:, 1] .= 1.0
+uvcoarse = copy(uv)
+k = zeros(length(dom))
 
-residual = ibm.BatchResidual(dmn; 
-    max_size = 10000) do domain, Q
-    u, v = eachrow(Q)
+dom(uv, uvcoarse, k) do part, uvdom, uvcoarse_dom, kdom
 
-    ibm.impose_bc!(domain, "wall", u, v) do bdry, U, V
-        nx, ny = eachrow(bdry.normals)
-        un = @. U * nx + V * ny
+    UV = part(uvdom)
+    UVc = part(uvcoarse_dom)
+    K = part(kdom)
+
+    ibm.impose_bc!(part, "wall", UV, K) do bdry, uvi, ki
+        u, v = eachcol(uvi)
+        nx, ny = eachcol(bdry.normals)
+
+        uvn = @. u * nx + v * ny
+
+        kb = similar(ki)
+        kb .= 1.0
 
         (
-            U .- un .* nx,
-            V .- un .* ny
+            uvi .- uvn .* bdry.normals, kb
         )
     end
 
-    [u'; v']
-end
+    ibm.impose_bc!(part, "FARFIELD", K) do bdry, ki
+        kb = similar(ki)
+        kb .= 0.0
 
-Q = zeros(2, length(msh))
-Q[1, :] .= 1.0
-R = residual(Q)
-
-@info "Timing residual"
-for _ = 1:10
-    @time residual(Q)
-end
-
-solver = ibm.NKSolver(domains...; max_size = 10000) do dom, u, ν
-    uavg = (
-        dom(u, -1, 0) .+ dom(u, 1, 0) .+ dom(u, 0, -1) .+ dom(u, 0, 1)
-    ) ./ 4
-
-    ibm.impose_bc!(dom, "wall", uavg) do bdry, ui
-        ub = similar(ui)
-        ub .= 1.0
-
-        ub
-    end
-    ibm.impose_bc!(dom, "farfield", uavg) do bdry, ui
-        ui .* 0.0
+        kb
     end
 
-    (uavg .- u) .* ν
+    UVc .= ibm.block_average(part, UV)
+
+    ibm.update_partition!(part, uvdom, UV)
+    ibm.update_partition!(part, uvcoarse_dom, UVc)
+    ibm.update_partition!(part, kdom, K)
+
 end
 
-ν = fill(2.0, length(msh))
-u = zeros(length(msh))
-
-@info "Timing solver"
-for _ = 1:10 # 10 iterations
-    @time u .+= solver(u, ν)
-end
-
-solver = similar(solver) do dom, u, ν
-    uavg = (
-        dom(u, -1, 0) .+ dom(u, 1, 0) .+ dom(u, 0, -1) .+ dom(u, 0, 1)
-    ) ./ 4
-
-    ibm.impose_bc!(dom, "wall", uavg) do bdry, ui
-        ub = similar(ui)
-        ub .= 1.0
-
-        ub
-    end
-    ibm.impose_bc!(dom, "farfield", uavg) do bdry, ui
-        ui .* 0.0
-    end
-
-    (uavg .- u) .* ν
-end
-
-for _ = 1:10 # 10 iterations
-    @time u .+= solver(u, ν)
-end
-
-surf = ibm.Surface(dmn, "wall")
-
-vtk = ibm.surf2vtk("n0012_surf", surf; u = u)
-mshr.vtk_save(vtk)
-
-vtk = mshr.vtk_grid("n0012", msh; uavg = uavg, u = u, Q = Q, R = R)
-mshr.vtk_save(vtk)
-
-dmn_coarse = ibm.Domain(meshes[end])
-intp = ibm.Interpolator(dmn, dmn_coarse)
-u = intp(u)
-
-vtk = mshr.vtk_grid("n0012_coarse", meshes[end]; u = u)
-mshr.vtk_save(vtk)
-
-sub = residual.subdomains[5]
-vtk = mshr.vtk_grid("n0012_subdomain", sub.mesh)
-mshr.vtk_save(vtk)
+ibm.export_vtk("n0012_results", dom;
+    uv = uv, uvcoarse = uvcoarse, k = k)

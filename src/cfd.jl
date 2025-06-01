@@ -123,13 +123,42 @@ module CFD
         Sr * fl - Sl * fr + Sl * Sr * (ur - ul)
     ) / (Sr - Sl)
 
+
+    """
+    $TYPEDSIGNATURES
+
+    Convert block-structured notation (last dim. as state variable) to matrix
+    notation (first dim. as state variable). Also returns original array size.
+    """
+    block2mat(a::AbstractArray) = (
+        ndims(a) == 2 ? (a, nothing) : (
+            (reshape(a, :, size(a, ndims(a))) |> transpose), size(a)
+        )
+    )
+
+    """
+    $TYPEDSIGNATURES
+
+    Convert matrix notation (first dim. as state variable) to block-structured
+    notation (last dim. as state variable) given final array size
+    """
+    mat2block(a::AbstractMatrix, s::Union{Tuple, Nothing}) = (
+        isnothing(s) ? a : (
+            reshape(transpose(a), s...)
+        )
+    )
+
     """
     $TYPEDSIGNATURES
 
     HLL Riemann solver flux evaluation. Receives state variable matrices
-    (one row per state variable) and a dimension number
+    (one row per state variable) or block-structured arrays (last dim for
+    state variable) and a dimension number
     """
-    function HLL(Ql::AbstractMatrix, Qr::AbstractMatrix, dim::Int64, fluid::Fluid)
+    function HLL(Ql::AbstractArray, Qr::AbstractArray, dim::Int64, fluid::Fluid)
+
+        Ql, bsize = block2mat(Ql)
+        Qr, _ = block2mat(Qr)
 
         state_l = eachrow(Ql)
         state_r = eachrow(Qr)
@@ -159,7 +188,7 @@ module CFD
         Sr = @. max(0.0, vl + al)
         Sl = @. min(0.0, vr - ar)
 
-        @. _hll(Ql, Qr, Fl, Fr, Sl', Sr')
+        (@. _hll(Ql, Qr, Fl, Fr, Sl', Sr')) |> x -> mat2block(x, bsize)
 
     end
 
@@ -189,9 +218,13 @@ module CFD
     $TYPEDSIGNATURES
 
     AUSM scheme flux evaluation. Receives state variable matrices
-    (one row per state variable) and a dimension number
+    (one row per state variable) or block-structured arrays (last dim for
+    state variable) and a dimension number
     """
-    function AUSM(Ql::AbstractMatrix, Qr::AbstractMatrix, dim::Int64, fluid::Fluid)
+    function AUSM(Ql::AbstractArray, Qr::AbstractArray, dim::Int64, fluid::Fluid)
+
+        Ql, bsize = block2mat(Ql)
+        Qr, _ = block2mat(Qr)
 
         state_l = eachrow(Ql)
         state_r = eachrow(Qr)
@@ -226,7 +259,7 @@ module CFD
 
         F[dim + 2, :] .+= P
 
-        F
+        mat2block(F, bsize)
 
     end
 
@@ -251,12 +284,17 @@ module CFD
     JST-KE scheme fluxes
     """
     function JSTKE(
-        Qim1::AbstractMatrix{Float64},
-        Qi::AbstractMatrix{Float64},
-        Qip1::AbstractMatrix{Float64},
-        Qip2::AbstractMatrix{Float64},
+        Qim1::AbstractArray{Float64},
+        Qi::AbstractArray{Float64},
+        Qip1::AbstractArray{Float64},
+        Qip2::AbstractArray{Float64},
         dim::Int64, fluid::Fluid
     )
+
+        Qim1, bsize = block2mat(Qim1)
+        Qi, _ = block2mat(Qi)
+        Qip1, _ = block2mat(Qip1)
+        Qip2, _ = block2mat(Qip2)
 
         pim1 = state2primitive(fluid, eachrow(Qim1)...)[1]
         p, T, v = let prims = state2primitive(fluid, eachrow(Qi)...)
@@ -288,7 +326,7 @@ module CFD
         E[2, :] .+= (p .* v)
         E[dim + 2, :] .+= p
 
-        @. E + (Qi - Qip1) * (ν * λ)' / 2
+        (@. E + (Qi - Qip1) * (ν * λ)' / 2) |> x -> mat2block(x, bsize)
 
     end
 

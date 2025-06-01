@@ -1,395 +1,123 @@
 module ImmersedBoundary
 
     include("mesher.jl")
-    using .Mesher
+    import .Mesher as mshr
+    using .Mesher: Stereolitography, Ball, Box, Line,
+        PlaneSDF, TriReference, Projection
+    using .Mesher.WriteVTK
+    using .Mesher.STLHandler: STLTree, point_in_polygon, 
+        refine_to_length, stl2vtk
 
     using .Mesher.DocStringExtensions
     using .Mesher.LinearAlgebra
 
-    using NearestNeighbors
+    include("nninterp.jl")
+    using .NNInterpolator
+
+    using Base.Iterators
+    using Serialization
 
     """
     $TYPEDFIELDS
 
-    Struct to hold an interpolator from mesh points
+    Struct to define a Cartesian grid block
     """
-    struct Interpolator
-        n_outputs::Int32
-        fetch_to::AbstractVector{Int32}
-        fetch_from::AbstractVector{Int32}
-        interpolate_to::AbstractVector{Int32}
-        stencils::AbstractMatrix{Int32}
-        weights::AbstractMatrix{Float64}
+    struct Block
+        margin::Int32
+        size::Tuple
+        origin::Tuple
+        widths::Tuple
+        spacing::Tuple
     end
 
     """
     $TYPEDSIGNATURES
 
-    Obtain interpolator based on a KDTree and matrix of evaluation points.
-    Uses linear interpolation (`linear = true`) or Sherman's interpolation (IDW).
+    Constructor for a block
     """
-    function Interpolator(msh::Mesher.Mesh, X::AbstractMatrix, 
-        tree::Union{KDTree, Nothing} = nothing;
-        linear::Bool = true)
-
-        if isnothing(tree)
-            tree = KDTree(msh.centers)
-        end
-
-        n_outputs = size(X, 2)
-        nd = size(X, 1)
-        kneighs = 2 ^ nd
-
-        if n_outputs == 0
-            return Interpolator(
-                0, Int32[], Int32[], 
-                Int32[], 
-                Matrix{Int32}(undef, kneighs, 0), Matrix{Float64}(undef, kneighs, 0)
-            )
-        end
-
-        stencils, dists = knn(tree, X, kneighs)
-        stencils = reduce(hcat, stencils)
-        dists = reduce(hcat, dists)
-
-        weights = similar(dists)
-
-        for (j, x) in enumerate(eachcol(X))
-            ds = @view dists[:, j]
-            inds = @view stencils[:, j]
-            cnts = @view msh.centers[:, inds]
-
-            w = let ϵ = eps(eltype(ds))
-                w = @. 1.0 / (ds + ϵ)
-            end
-
-            if linear
-                A = mapreduce(
-                    c -> [1.0 (c .- x)'],
-                    vcat,
-                    eachcol(cnts)
-                ) .* w
-
-                weights[:, j] .= pinv(A)[1, :] .* w
-            else
-                weights[:, j] .= (w ./ sum(w))
-            end
-        end
-
-        threshold = sqrt(eps(eltype(dists)))
-        is_same_point = @. abs(weights - 1.0) < threshold
-        # find if all other weigths are zero
-        let is_near_zero = map(
-            c -> sum(abs.(c) .< threshold) == kneighs - 1,
-            eachcol(weights)
-        )
-            is_same_point .*= is_near_zero'
-        end
-
-        should_fetch = map(any, eachcol(is_same_point))
-        fetch_to = findall(should_fetch)
-        fetch_from = vec(stencils)[vec(is_same_point)]
-        @assert length(fetch_to) == length(fetch_from) "Coinciding mesh centers?"
-
-        interpolate_to = findall(
-            (@. !should_fetch)
-        )
-
-        Interpolator(
-            n_outputs,
-            fetch_to, fetch_from,
-            interpolate_to, stencils[:, interpolate_to], weights[:, interpolate_to]
-        )
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Evaluate interpolator
-    """
-    function (intp::Interpolator)(Q::AbstractVector)
-        Qnew = similar(Q, eltype(Q), intp.n_outputs)
-
-        if length(intp.fetch_to) > 0
-            Qnew[intp.fetch_to] .= Q[intp.fetch_from]
-        end
-
-        if length(intp.interpolate_to) > 0
-            Qnew[intp.interpolate_to] .= dropdims(
-                sum(
-                    view(Q, intp.stencils) .* intp.weights;
-                    dims = 1
-                );
-                dims = 1
-            )
-        end
-        
-        Qnew
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Interpolate multi-dimensional array.
-    The last dimension is assumed to refer to the cell index.
-    """
-    (intp::Interpolator)(Q::AbstractArray) = mapslices(
-        intp, Q; dims = ndims(Q)
+    Block(
+            origin::AbstractVector{Float64}, widths::AbstractVector{Float64},
+            size::Tuple{Vararg{Int}};
+            margin::Int = 1
+    ) = Block(
+              margin, size, tuple(origin...), tuple(widths...), tuple((widths ./ size)...)
     )
 
     """
+    $TYPEDSIGNATURES
+
+    Obtain all indices that define positions in the block
+    """
+    cartesian_indices(blck::Block) = Base.product([1:(s + 2 * blck.margin) for s in blck.size]...)
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain position of a cell center given its index
+    """
+    cell_center(blck::Block, i::Int...) = (@. blck.origin + blck.spacing * (i - 0.5 - blck.margin))
+
+    """
     $TYPEDFIELDS
 
-    Struct to describe a boundary.
-
-    `distance_field` represents the distance of every cell in the mesh to the boundary.
-    All other properties are defined for ghost cells only, however.
+    Struct to define a boundary
     """
-    struct Boundary 
-        ghost_indices::AbstractVector{Int32}
-        distances::AbstractVector{Float64}
-        image_distances::AbstractVector{Float64}
-        normals::AbstractMatrix{Float64}
-        centers::AbstractMatrix{Float64}
-        projections::AbstractMatrix{Float64}
-        distance_field::AbstractVector{Float64}
+    struct Boundary
         image_interpolator::Interpolator
+        points::AbstractMatrix{Float64}
+        normals::AbstractMatrix{Float64}
+        image_distances::AbstractVector{Float64}
+        ghost_distances::AbstractVector{Float64}
+        ghost_indices::AbstractVector{Int64}
     end
 
     """
     $TYPEDSIGNATURES
 
-    Construct a boundary from a mesh, a boundary name, 
-    a ratio between the min. image point distance and the ghost cell
-    circumradius, and a range of distances/circumradii at which cells
-    are detected to be ghost points.
+    Create a boundary from partition info
     """
     function Boundary(
-        msh::Mesher.Mesh, tree::KDTree, bname::String;
-        ghost_distance_ratio::Tuple{Float64, Float64} = (- Inf64, 1.0),
-        image_distance_ratio::Float64 = 1.0,
+        circumradius::AbstractVector{Float64},
+        X::AbstractMatrix{Float64}, 
+        projs::AbstractMatrix{Float64},
+        sdfs::AbstractVector{Float64},
+        tree::KDTree,
+        ghost_ratios::Tuple{Float64, Float64}
     )
-        projections = msh.boundary_projections[bname]
-        is_in_domain = msh.boundary_in_domain[bname]
-        sdf = map(
-            (p, c, i) -> norm(c .- p) * (2 * i - 1),
-            eachcol(projections), eachcol(msh.centers), is_in_domain
+        #check for ghost indices between circumradius thresholds
+        g1, g2 = ghost_ratios
+        ghost_indices = findall(
+            (@. (sdfs <= g2 * circumradius) && (sdfs >= g1 * circumradius))
         )
 
-        ρmin, ρmax = ghost_distance_ratio
-        image_distance_ratio = max(image_distance_ratio, ρmax)
+        # filter arrays to ghosts only
+        projs = projs[ghost_indices, :]
+        ghosts = X[ghost_indices, :]
+        circumradius = circumradius[ghost_indices]
 
-        circumradii = map(norm, eachcol(msh.widths)) ./ 2
-        ghost_indices = map(
-            (d, r) -> (
-                d >= ρmin * r && d <= ρmax * r
-            ),
-            sdf, circumradii
-        ) |> findall
+        # obtain normals and ghost distances
+        normals = @. (ghosts - projs)
+        ghost_distances = sdfs[ghost_indices]
 
-        centers = msh.centers[:, ghost_indices]
-        projections = projections[:, ghost_indices]
-        ghost_sdf = sdf[ghost_indices]
-        circumradii = circumradii[ghost_indices]
+        ϵ = eps(Float64) # regularize
+        @. normals /= (ghost_distances + sign(ghost_distances) * ϵ)
 
-        ϵ = eps(eltype(centers))
-        nd = size(centers, 1)
-
-        normals = (centers .- projections) .* (@. sign(ghost_sdf) / (abs(ghost_sdf) + ϵ))'
+        # obtain image distance as per heuristics
+        sqnd = sqrt(size(normals, 2))
         image_distances = @. max(
-            circumradii * sqrt(nd), circumradii * sqrt(nd) * image_distance_ratio + ghost_sdf
+            circumradius * sqnd, ghost_distances + circumradius * sqnd * 1.1
         )
 
-        image_points = projections .+ normals .* image_distances'
+        image_points = @. projs + normals * image_distances
+
+        # construct image interpolator
+        intp = Interpolator(X, image_points, tree; linear = true, first_index = true)
 
         Boundary(
-            ghost_indices,
-            ghost_sdf, image_distances,
-            normals, centers, projections,
-            sdf, Interpolator(msh, image_points, tree)
+            intp, ghosts, normals, 
+            image_distances, ghost_distances,
+            ghost_indices
         )
-    end
-
-    """
-    $TYPEDFIELDS
-
-    Struct to define a domain
-    """
-    struct Domain
-        mesh::Mesher.Mesh
-        tree::Union{Nothing, KDTree}
-        stencil_interpolators::Dict{Tuple, Interpolator}
-        boundaries::Dict{String, Boundary}
-        centers::AbstractMatrix{Float64}
-        widths::AbstractMatrix{Float64}
-        ghost_distance_ratio::Tuple{Float64, Float64}
-        image_distance_ratio::Float64
-    end
-
-    """
-    $TYPEDSIGNATURES
-    
-    Instantiate domain from mesh.
-
-    Boundaries are defined from a ratio between the min. image point distance 
-    and the ghost cell circumradius, and a range of distances/circumradii at 
-    which cells are detected to be ghost points.
-    """
-    function Domain(
-        msh::Mesher.Mesh;
-        ghost_distance_ratio::Tuple{Float64, Float64} = (- Inf64, 1.0),
-        image_distance_ratio::Float64 = 1.0,
-    )
-        tree = KDTree(msh.centers)
-
-        Domain(
-            msh,
-            tree,
-            Dict{Tuple, Interpolator}(),
-            Dict{String, Boundary}(
-                [
-                    bname => Boundary(
-                        msh, tree, bname;
-                        ghost_distance_ratio = ghost_distance_ratio,
-                        image_distance_ratio = image_distance_ratio
-                    ) for bname in keys(msh.boundary_in_domain)
-                ]...
-            ),
-            copy(msh.centers), copy(msh.widths),
-            ghost_distance_ratio, image_distance_ratio
-        )
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain value of array at stencil point.
-
-    Example for y-axis derivative in 2D grid:
-
-    ```
-    dx, dy = eachrow(
-        domain.widths
-    )
-
-    du!dy = (
-        domain(u, 0, 1) .- domain(u, 0, -1)
-    ) ./ (2 .* dy)
-    ```
-    """
-    function (domain::Domain)(
-        u::AbstractArray, inds::Int64...
-    )
-        v_inds = collect(inds)
-
-        if all(v_inds .== 0)
-            return copy(u)
-        end
-
-        if !haskey(domain.stencil_interpolators, inds)
-            st = Interpolator(
-                domain.mesh, 
-                domain.mesh.centers .+ v_inds .* domain.mesh.widths,
-                domain.tree
-            )
-
-            bend = domain.centers |> typeof |> x -> Base.typename(x).wrapper
-            if !(bend <: Array)
-                st = to_backend(st, x -> bend(x))
-            end
-
-            domain.stencil_interpolators[inds] = st
-        end
-
-        domain.stencil_interpolators[inds](u)
-    end
-
-    _mul_last(u::AbstractArray, v::AbstractVector) = let s = ones(Int64, ndims(u))
-        s[end] = length(v)
-
-        u .* reshape(v, s...)
-    end
-    _view_last(u::AbstractArray, i) = selectdim(
-        u, ndims(u), i
-    )
-
-    """
-    $TYPEDSIGNATURES
-
-    Impose boundary conditions in-place for state variables in `args`.
-    These state variables must be given by arrays in which the last dimension indicates
-    the cell index.
-
-    Function `f` should receive a boundary struct (boundary `domain.boundaries[bname]`)
-    and the values of `args` interpolated to image points, and return the values of one or more
-    state variables (as ordered in `args`) at the boundary.
-
-    Example for a 2D Euler wall imposed on a velocity field:
-
-    ```
-    impose_bc!(domain, "wall", u, v) do bdry, ui, vi
-        nx, ny = eachrow(bdry.normals)
-
-        un = @. ui * nx + vi * ny
-
-        (
-            ui .- un .* nx,
-            vi .- un .* ny
-        )
-    end
-    ```
-
-    Check `?ibm.Boundary` for other useful boundary properties.
-
-    Another implementation with multidimensional arrays would be:
-
-    ```
-    impose_bc!(domain, "wall", UV) do bdry, UVi
-        ui, vi = eachrow(UVi)
-
-        nx, ny = eachrow(bdry.normals)
-
-        un = @. ui * nx + vi * ny
-
-        vcat(
-            (ui .- un .* nx)',
-            (vi .- un .* ny)'
-        )
-    end
-    ```
-
-    Note that fewer return values than `args` may be returned, case in which the remaining `args`
-    are left unaltered, but are passed for boundary value calculation anyway.
-
-    All kwargs are forwarded to `f`.
-
-    The values are linearly interpolated/extrapolated to the boundary.
-    For other applications, `f` may directly return values at ghost points by turning
-    on flag `at_ghost`.
-    """
-    function impose_bc!(
-        f, domain::Domain, bname::String, args::AbstractArray...;
-        at_ghost::Bool = false,
-        kwargs...
-    )
-        bdry = domain.boundaries[bname]
-
-        aimage = copy.(map(bdry.image_interpolator, args))
-        fa = f(bdry, aimage...; kwargs...)
-        if !(fa isa Tuple)
-            fa = (fa,)
-        end
-
-        η = bdry.distances ./ bdry.image_distances
-        for (a, ab, ai) in zip(args, fa, aimage)
-            if at_ghost
-                _view_last(a, bdry.ghost_indices) .= ab
-            else
-                _view_last(a, bdry.ghost_indices) .= (
-                    _mul_last(ai, η) .+ _mul_last(ab, 1.0 .- η)
-                )
-            end
-        end
     end
 
     function _simplex_normal(simplex::Matrix{Float64})
@@ -465,20 +193,19 @@ module ImmersedBoundary
     triangle side is larger than the provided value.
     """
     function Surface(
-        domain::Domain, stl::Mesher.Stereolitography; max_length::Float64 = 0.0
+        X::AbstractMatrix{Float64}, 
+        tree::KDTree, 
+        stl::Mesher.Stereolitography; max_length::Float64 = 0.0
     )
 
-        msh = domain.mesh
-
         if max_length > 0.0
-            stl = Mesher.refine_to_length(stl, max_length)
+            stl = refine_to_length(stl, max_length)
         end
 
         nd = size(stl.points, 1)
+        points = permutedims(stl.points)
 
-        interpolator = Interpolator(msh, stl.points, domain.tree)
-
-        points = copy(stl.points)
+        interpolator = Interpolator(X, points, tree; first_index = true)
 
         _, normals = centers_and_normals(stl)
 
@@ -491,14 +218,14 @@ module ImmersedBoundary
                 end
             end
 
-            point_normals
+            permutedims(point_normals)
         end
 
-        ϵ = eltype(normals) |> eps |> sqrt
+        ϵ = eltype(normals) |> eps
         areas = map(
-                    n -> norm(n) + ϵ, eachcol(normals)
+                    n -> norm(n) + ϵ, eachrow(normals)
         )
-        normals = normals ./ areas'
+        normals = normals ./ areas
 
         Surface(
             deepcopy(stl),
@@ -513,100 +240,934 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Obtain a surface from a domain and a set of mesh boundary names.
-
-    If `max_length` is provided, the STL surface is refined by tri splitting until no
-    triangle side is larger than the provided value.
-
-    If no boundaries are selected, all available triangulated surfaces are used.
-    """
-    Surface(
-        domain::Domain, bnames::String...; max_length::Float64 = 0.0
-    ) = (
-        length(bnames) == 0 ?
-        Surface(
-            domain, keys(domain.mesh.stereolitographies)...; max_length = max_length
-        ) :
-        let stl = map(
-            bname -> domain.mesh.stereolitographies[bname], bnames
-        ) |> x -> cat(x...)
-            Surface(domain, stl; max_length = max_length)
-        end
-    )
-
-    """
-    $TYPEDSIGNATURES
-
-    Interpolate a field property to a surface
+    Interpolate a field property to a surface. The first index should refer to 
+    cell/surface point index.
     """
     (surf::Surface)(u::AbstractArray) = surf.interpolator(u)
 
     """
     $TYPEDSIGNATURES
 
-    Obtain VTK grid for a given surface.
-
-    Kwargs are taken as surface point data (see `getindex(u::AbstractArray, surf::Surface)`).
-    If a provided array has more than `n` elements, if `n` is the number of points in the surface,
-    the data is interpolated.
+    integrate a property throughout a surface
     """
-    function surf2vtk(fname, surf::Surface; kwargs...)
+    surface_integral(surf::Surface, u::AbstractVector) = (surf.areas .* u |> sum)
 
-        kws = Dict(
+    """
+    $TYPEDSIGNATURES
+
+    integrate a property throughout a surface. The first dimension in the array
+    is assumed to refer to point/cell indices
+    """
+    surface_integral(surf::Surface, u::AbstractArray) = (
+        surf.areas .* u |> a -> sum(a; dims = 1) |> a -> dropdims(a; dims = 1)
+    )
+
+    """
+    $TYPEDFIELDS
+
+    Type to represent a mesh parition.
+    """
+    struct Partition
+        size::Tuple
+        block_size::Tuple
+        spacing::AbstractMatrix{Float64}
+        interpolator::Interpolator
+        domain::AbstractVector{Int32}
+        image::AbstractVector{Int32}
+        in_domain::AbstractVector{Int32}
+        blocks::AbstractVector{Block}
+        boundaries::Dict{String, Boundary}
+    end
+
+    """
+    $TYPEDFIELDS
+
+    Struct defining a domain
+    """
+    struct Domain
+        ndofs::Int64
+        size::Tuple
+        spacing::AbstractMatrix{Float64}
+        blocks::AbstractVector{Block}
+        boundary_distances::AbstractDict
+        surfaces::AbstractDict
+        partitions::AbstractVector{Partition}
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain number of DOFs in a domain
+    """
+    Base.length(dom::Domain) = dom.ndofs
+
+    """
+    Create ranges defining which block goes to which partition
+    """
+    partition_ranges(N::Int, nmax::Int) = let nparts = (
+        N ÷ nmax + 1
+    )
+        dn = N ÷ nparts
+        n0 = 0
+
+        pranges = []
+        for i = 1:nparts
+            push!(
+                pranges,
+                (n0 + 1):(
+                    i == nparts ?
+                    N :
+                    (n0 + dn)
+                )
+            )
+
+            n0 += dn
+        end
+
+        pranges
+    end
+
+    """
+    $TYPEDSIGNATURES
+        
+    Generate a Building Cubes mesh defined by:
+
+    * A hypercube origin;
+    * A vector of hypercube widths;
+    * A set of tuples in format `(name, surface, max_length)` describing
+        stereolitography surfaces (`Mesher.Stereolitography`) and 
+        the max. cell widths at these surfaces;
+    * A "margin" of cells for each block, used for inter-block communication;
+    * A block size, in the form of a tuple with number of cells along each axis, or
+        an integer with the same number for all axes;
+    * A set of refinement regions described by distance functions and
+        the local refinement at each region. Example:
+            ```
+            refinement_regions = [
+                ibm.Ball([0.0, 0.0], 0.1) => 0.005,
+                ibm.Ball([1.0, 0.0], 0.1) => 0.005,
+                ibm.Box([-1.0, -1.0], [3.0, 2.0]) => 0.0025,
+                ibm.Line([1.0, 0.0], [2.0, 0.0]) => 0.005
+            ]
+            ```
+    * A maximum cell size (optional);
+    * An interval of ratios between the cell circumradius and the SDF of a given surface for 
+        which cells are defined as ghosts;
+    * A point reference within the domain. If absent, external flow is assumed;
+    * An approximation ratio between wall distance and cell circumradius past which
+        distance functions are approximated; 
+    * A maximum number of octree blocks per partition; and
+    * A set of families defining surface groups for postprocessing, BC imposition and wall
+        distance calculations.
+
+    The families may be defined with the following syntax:
+
+    ```
+    surfaces = [
+        ("wing", "wing.stl", 1e-3),
+        ("flap", "flap.stl", 1e-3)
+    ]
+    families = [
+        "wall" => ["wing", "flap"], # a group of surface names
+        "inlet" => [
+            (1, false), # fwd face, first dimension (x)
+            (2, false), # left face, second dimension (y)
+            (2, true), # right face, second dimension (y)
+            (3, false), # bottom face, third dimension (z)
+            (3, true), # top face, third dimension (z)
+        ],
+        "outlet" => [(1, true)]
+    ]
+
+    dom = ibm.Domain(origin, widths, surfaces...; families = families)
+    ```
+
+    The default family definition uses each surface as a family and defines
+    the farfield as `"FARFIELD"`.
+    """
+    function Domain(
+            origin::Vector{Float64}, widths::Vector{Float64},
+            surfaces::Tuple{String, Stereolitography, Float64}...;
+            margin::Int64 = 2,
+            block_sizes::Union{Tuple, Int} = 8,
+            refinement_regions::AbstractVector = [],
+            max_length::Float64 = Inf,
+            ghost_layer_ratio::Tuple = (-2.1, 2.1),
+            interior_point = nothing,
+            approximation_ratio::Float64 = 2.0,
+            verbose::Bool = false,
+            max_partition_blocks::Int64 = 1000,
+            families = nothing,
+    )
+        nd = length(origin)
+        if block_sizes isa Number # if it's an int, use it for all dimensions
+            block_sizes = tuple(
+                fill(block_sizes, nd)...
+            )
+        end
+        maxwidth = max(block_sizes...)
+
+        if verbose
+            println("Generating octree...")
+        end
+        msh = mshr.FixedMesh(
+            origin, widths,
             [
-                k => (
-                    size(v, ndims(v)) == size(surf.stereolitography.points, 2) ?
-                    v :
-                    surf(v)
-               ) for (k, v) in kwargs
+                (bname, stl, s * maxwidth) for (bname, stl, s) in surfaces
+            ]...;
+            growth_ratio = 2.0 / (3 * sqrt(nd)) + 0.99,
+            refinement_regions = [
+                sdf => s * maxwidth for (sdf, s) in refinement_regions
+            ],
+            max_length = max_length * maxwidth,
+            ghost_layer_ratio = -1.0 + ghost_layer_ratio[1] / maxwidth,
+            interior_point = interior_point,
+            approximation_ratio = approximation_ratio,
+            verbose = verbose,
+        )
+
+        stl_dict = Dict( # store all STLs in a dictionary. We'll need them later for fam. construction
+            [
+                bname => stl for (bname, stl, _) in surfaces
             ]...
         )
 
-        Mesher.stl2vtk(fname, surf.stereolitography; kws...)
+        if isnothing(families) # default: FARFIELD + whichever surfaces you have
+            if haskey(stl_dict, "FARFIELD")
+                throw(error("Surface definition uses reserved name FARFIELD"))
+            end
 
+            families = Dict{String, AbstractVector}(
+                "FARFIELD" => collect(
+                    Iterators.product(1:nd, (false, true))
+                ) |> vec
+            )
+
+            for (bname, _, _) in surfaces
+                families[bname] = [bname]
+            end
+        end
+
+        if haskey(stl_dict, "surface") || haskey(families, "surface")
+            throw(error("Surface/family name \'surface\' is reserved"))
+        end
+
+        blocks = [ # define block structs as helpers
+            Block(
+                o, w, block_sizes; margin = margin
+            ) for (o, w) in zip(
+                eachcol(msh.origins), eachcol(msh.widths)
+            )
+        ]
+
+        # array size for a few vars. we're storing in a minute
+        array_size = (length(blocks), (block_sizes .+ 2margin)...)
+
+        # where are the cells? are they actual cells, or blanked regions?
+        in_domain = trues(array_size...)
+        cell_centers = Array{Float64}(undef, array_size..., nd)
+        for (ib, block) in enumerate(blocks)
+            for inds in cartesian_indices(block)
+                c = cell_center(block, inds...)
+
+                cell_centers[ib, inds..., :] .= c
+
+                if any(
+                    (@. inds <= margin || inds > block.size + margin)
+                )
+                    in_domain[ib, inds...] = false
+                end
+            end
+        end
+
+        # now let's calculate SDFs and surface projections
+        boundary_projs = Dict{String, AbstractArray{Float64}}()
+        boundary_sdfs = Dict{String, AbstractArray{Float64}}()
+
+        for (fam, famdef) in families
+            if verbose
+                println("Calculating SDFs to family $fam...")
+            end
+
+            bprojs = Array{Float64}(undef, array_size..., nd)
+            bsdfs = Array{Float64}(undef, array_size...)
+
+            boundary_projs[fam] = bprojs
+            boundary_sdfs[fam] = bsdfs
+
+            if all( # case with STL surface
+                f -> (f isa String), famdef
+            )
+                stl = mapreduce( # join all STLs together
+                    f -> stl_dict[f],
+                    cat, famdef
+                )
+                tree = STLTree(stl) # construct triangulation tree structure
+
+                for (ib, block) in enumerate(blocks) # iterate for blocks
+                    # for the current octree cell, obtain the closest projection
+                    c = msh.centers[:, ib]
+                    p = zeros(nd)
+                    sdf = Inf64
+                    for surf in famdef
+                        _p = msh.boundary_projections[surf][:, ib]
+                        _sdf = (
+                            msh.boundary_in_domain[surf][ib] * 2 - 1
+                        ) * norm(
+                            _p .- c
+                        )
+
+                        if _sdf < sdf
+                            sdf = _sdf
+                            p .= _p
+                        end
+                    end
+
+                    circumradius = norm(block.widths) / 2
+
+                    # if below threshold, calculate exact SDF. Else, use plane surface for
+                    # approximation
+                    triref = nothing
+                    if abs(sdf) > circumradius * approximation_ratio
+                        triref = TriReference(
+                            PlaneSDF(
+                                Projection(p, sdf >= 0.0),
+                                c
+                            ), 
+                            c,
+                            sdf >= 0.0
+                        )
+                    else
+                        triref = TriReference(
+                            tree,
+                            c,
+                            sdf >= 0.0
+                        )
+                    end
+
+                    for inds in cartesian_indices(block)
+                        c = cell_center(block, inds...) |> collect
+                        p = Projection(triref, c)
+
+                        bprojs[ib, inds..., :] .= p.projection
+                        bsdfs[ib, inds...] = norm(
+                            p.projection .- c
+                        ) * (2 * p.interior - 1)
+                    end
+                end
+            elseif all(
+                f -> (f isa Tuple), famdef
+            )
+                bsdfs .= Inf64
+
+                # this is simpler. Just use distance to plane for all hypercube faces
+                for (dim, front) in famdef
+                    ref = @. origin + widths / 2
+                    proj = copy(ref)
+                    if front
+                        proj[dim] = origin[dim] + widths[dim]
+                    else
+                        proj[dim] = origin[dim]
+                    end
+
+                    triref = TriReference(
+                        PlaneSDF(
+                            Projection(proj, true), # we're always in the domain. It's an
+                            ref # enveloping hypercube!
+                        ), 
+                        ref, true
+                    )
+
+                    for (ib, block) in enumerate(blocks)
+                        for inds in cartesian_indices(block)
+                            c = cell_center(block, inds...) |> collect
+                            p = Projection(triref, c)
+                            d = norm(p.projection .- c)
+
+                            if d < bsdfs[ib, inds...]
+                                bprojs[ib, inds..., :] .= p.projection
+                                bsdfs[ib, inds...] = d
+                            end
+                        end
+                    end
+                end
+            else
+                throw(error("Erroneous family definition. Check docs"))
+            end
+
+            # eliminate blanked cells (further in than the ghost layer)
+            # from the domain
+            for (ib, block) in enumerate(blocks)
+                circumradius = norm(block.spacing) / 2
+
+                idom = selectdim(in_domain, 1, ib)
+                sdfs = selectdim(bsdfs, 1, ib)
+                
+                let r = ghost_layer_ratio[1]
+                    @. idom = idom && (sdfs >= r * circumradius)
+                end
+            end
+        end
+
+        # this is where it gets a little confusing, cause we have
+        # to store tons of indices. Buckle up
+
+        # indices of non-blanked cells in domain. Let's keep it in block-structured shape
+        index_in_domain = reshape(
+            cumsum(vec(in_domain)), size(in_domain)...
+        )
+        n_in_domain = index_in_domain[end] # number of non-blanked cells
+
+        # positions of cell centers for non-blanked cells
+        X_in_domain = let Xtot = reshape(cell_centers, :, nd)
+            view(Xtot, vec(in_domain), :)
+        end
+
+        # KD tree for interpolator construction
+        tree = KDTree(X_in_domain')
+
+        # now, let's start partitioning the domain
+        partitions = Partition[]
+        pranges = partition_ranges(
+            length(blocks), max_partition_blocks
+        )
+        for prange in pranges
+            # slices for the current partition:
+            indom = selectdim(in_domain, 1, prange)
+            idx_indom = selectdim(index_in_domain, 1, prange)
+            ccenters = selectdim(cell_centers, 1, prange)
+
+            part_size = size(indom)
+
+            # convert to array notation
+            X = reshape(ccenters, :, nd)
+            indom = vec(indom)
+            idx_indom = vec(idx_indom)
+            local_idx_indom = findall(indom) # indices of non-blanked cells among all in the 
+            # current partition
+
+            # obtain interpolator to current partition cells (including blanks)
+            intp = Interpolator(
+                X_in_domain,
+                X,
+                tree; 
+                linear = false, first_index = true
+            )
+            dom = NNInterpolator.domain(intp) # obtain domain of influence for interpolated points
+
+            # filter to non-blanked cells
+            idx_indom = idx_indom[local_idx_indom]
+
+            # convert interpolator and image indices to work on said domain of influence
+            hmap = NNInterpolator.index_map(dom)
+            intp = NNInterpolator.filtered(intp, hmap)
+            idx_indom = map(i -> hmap[i], idx_indom)
+
+            # calculate circumradius for each cell. Used for boundary definition
+            circumradius = let cr = Array{Float64}(undef, part_size...)
+                for (i, ib) in enumerate(prange)
+                    selectdim(cr, 1, i) .= norm(blocks[ib].spacing) / 2
+                end
+                cr
+            end
+            # filter to non-blanked cells and obtain KD Tree
+            circumradius = vec(circumradius)[local_idx_indom]
+            X = X[local_idx_indom, :]
+
+            part_tree = KDTree(X')
+
+            # define boundaries
+            boundaries = Dict{String, Boundary}()
+            for bname in keys(boundary_projs)
+                projs = selectdim(
+                    boundary_projs[bname], 1, prange
+                )
+                sdfs = selectdim(
+                    boundary_sdfs[bname], 1, prange
+                )
+
+                projs = reshape(projs, :, nd) |> x -> selectdim(x, 1, local_idx_indom)
+                sdfs = vec(sdfs) |> x -> view(x, local_idx_indom)
+
+                bdry = Boundary(
+                    circumradius,
+                    X,
+                    projs, sdfs,
+                    part_tree,
+                    ghost_layer_ratio
+                )
+
+                boundaries[bname] = bdry
+            end
+
+            push!(
+                partitions, Partition(
+                    part_size,
+                    blocks[1].size,
+                    (msh.widths[:, prange] ./ block_sizes) |> permutedims,
+                    intp,
+                    dom,
+                    idx_indom,
+                    local_idx_indom,
+                    blocks[prange],
+                    boundaries
+                )
+            )
+        end
+
+        in_domain = vec(in_domain) |> findall # store indices of non-blanked cells, only
+
+        # convert boundary SDFs to array notation
+        for (bname, sdf) in boundary_sdfs
+            boundary_sdfs[bname] = reshape(
+                sdf, :
+            )[in_domain]
+        end
+
+        # sinally,  let's create surface structs 
+        surface_dict = Dict{String, Surface}()
+        for (sname, stl, L) in surfaces
+            surface_dict[sname] = Surface(
+                X_in_domain, tree, stl;
+                max_length = L
+            )
+        end
+
+        Domain(
+            n_in_domain,
+            array_size,
+            (msh.widths ./ block_sizes) |> permutedims,
+            blocks,
+            boundary_sdfs,
+            surface_dict,
+            partitions
+        )
     end
+
+    include("arraybends.jl")
+    using .ArrayBackends
+
+    @declare_converter Interpolator
+    @declare_converter Boundary
+    @declare_converter Partition
 
     """
     $TYPEDSIGNATURES
 
-    integrate a property throughout a surface
-    """
-    surface_integral(surf::Surface, u::AbstractVector) = let uu = (
-        length(u) == size(surf.stereolitography.points, 2) ?
-        u :
-        surf(u)
+    Obtain values from an array in Cartesian grid format for a mesh partition.
+    
+    Example:
+
+    ```
+    u = rand(
+        length(domain), 3, 2
     )
-        surf.areas .* uu |> sum
+
+    domain(u) do part, udom
+        U = part(udom)
+        # shape (nblocks, nx, ny[, nz], 3, 2)
+    end
+    ```
+    """
+    function (part::Partition)(v::AbstractArray)
+        extra_dims = size(v)[2:end]
+
+        reshape(
+            part.interpolator(v), part.size..., extra_dims...
+        )
     end
 
     """
     $TYPEDSIGNATURES
 
-    integrate a property throughout a surface. The last dimension in the array
-    is assumed to refer to point/cell indices
+    Impose values from a block-Cartesian array `v` upon the 
+    correct indices of a flowfield array `vdom`
     """
-    surface_integral(surf::Surface, u::AbstractArray) = mapslices(
-        uu -> surface_integral(surf, uu), u; dims = ndims(u)
-    ) |> uu -> dropdims(uu; dims = ndims(uu))
-    
+    function update_partition!(part::Partition, vdom::AbstractArray, v::AbstractArray)
+        extra_dims = size(vdom)[2:end]
+
+        selectdim(vdom, 1, part.image) .= selectdim(
+            reshape(v, :, extra_dims...), 1, part.in_domain
+        );
+    end
+
     """
     $TYPEDSIGNATURES
 
+    Run a loop over the partitions of a domain and
+    execute operations.
+
+    Example:
+
     ```
-    v = getalong(u, domain, 2, -1)
-    # ... is equivalent to:
-    v = domain(u, 0, -1, 0)
+    domain(r, u) do partition, rdom, udom
+        # udom includes the parts of vector `u`
+        # which affect the residual at partition `partition`.
+
+        U = part(udom) # obtain Cartesian representation
+        # of u. Shape (nblocks, nx, ny[, nz])
+        R = part(rdom)
+
+        # now do some Cartesian grid operations and
+        # update R
+
+        ibm.update_partition!(part, rdom, R) # send values to `rdom`
+    end
+
+    # after the loop, the values of `rdom` are returned to
+    # array `r`
+    ```
+
+    This allows for large operations on field data
+    to be performed one partition at a time,
+    saving on max. memory usage.
+
+    Return values are also stored in a vector, which is
+    then returned.
+    Kwargs are passed to the called function.
+
+    Backend "converters" can be used to convert arrays to certain
+    array operation libraries (e.g. CUDA.jl) before operations are 
+    conducted. Example:
+
+    ```
+    dom(
+        u;
+        conv_to_backend = CuArray,
+        conv_from_backend = Array
+    ) do part, udom
+        @show typeof(udom) # CuArray
+    end
+    ```
+
+    This ensures that, while operating with GPU parallelization, 
+    information regarding a single partition at a time is ported to the GPU,
+    thus satisfying far tighter memory requirements.
+    """
+    (dom::Domain)(
+        f, args::AbstractArray...; 
+        conv_to_backend = nothing,
+        conv_from_backend = nothing,
+        kwargs...
+    ) = map(
+        part -> let pargs = map(
+            a -> selectdim(a, 1, part.domain) |> copy, 
+            args
+        )
+            mypart = part
+            if !isnothing(conv_to_backend)
+                pargs = map(
+                    a -> to_backend(a, conv_to_backend), pargs
+                )
+                mypart = to_backend(part, conv_to_backend)
+            end
+
+            r = f(mypart, pargs...; kwargs...)
+        
+            if !isnothing(conv_from_backend)
+                pargs = map(
+                    a -> to_backend(a, conv_from_backend), pargs
+                )
+            end
+
+            for (a, pa) in zip(args, pargs)
+                selectdim(a, 1, part.domain) .= pa
+            end
+
+            r
+        end,
+        dom.partitions
+    )
+
+    """
+    $TYPEDSIGNATURES
+
+    Impose boundary condition on block-structured array.
+
+    Example for non-penetration condition:
+
+    ```
+    dom(u, v) do part, udom, vdom
+        U = part(udom)
+        V = part(vdom)
+
+        ibm.impose_bc!(part, "wall", U, V) do bdry, uimage, vimage
+            nx, ny = bdry.normals |> eachcol
+            un = @. nx * uimage + ny * vimage
+
+            (
+                uimage .- un .* nx,
+                vimage .- vn .* ny
+            )
+        end
+
+        ibm.update_partition!(part, udom, U)
+        ibm.update_partition!(part, vdom, V)
+    end
+
+
+    # alternative return value:
+    uv = zeros(length(dom), 2)
+    uv[:, 1] .= 1.0
+    dom(uv) do part, uvdom
+        UV = part(uvdom)
+        
+        ibm.impose_bc!(part, "wall", UV) do bdry, uvim
+            uimage, vimage = eachcol(uvim)
+            nx, ny = eachcol(bdry.normals)
+            un = @. nx * uimage + ny * vimage
+
+            uvim .- un .* bdry.normals
+        end
+
+        ibm.update_partition!(part, uvdom, UV)
+    end
+    ```
+
+    Kwargs are passed directly to the BC function.
+    Note that other field variable args. may be passed, even if the 
+    BC function returns only a few return values at the boundary
+    (which will be edited).
+    """
+    function impose_bc!(
+        f,
+        part::Partition, bname::String,
+        args::AbstractArray{Float64}...;
+        kwargs...
+    )
+        nd = length(part.size)
+
+        pargs = map(
+            a -> selectdim(
+                let extra_dims = size(a)[(nd + 1):end]
+                    reshape(a, :, extra_dims...)
+                end, 1, part.in_domain
+            ), args
+        )
+        bdry = part.boundaries[bname]
+
+        if length(bdry.ghost_indices) == 0
+            return
+        end
+
+        bargs = f(bdry, bdry.image_interpolator.(pargs)...; kwargs...)
+
+        if !(bargs isa Tuple)
+            if bargs isa AbstractVector && first(bargs) isa AbstractArray
+                bargs = tuple(bargs...)
+            else
+                bargs = (bargs,)
+            end
+        end
+
+        for (b, a) in zip(bargs, pargs)
+            gd = bdry.ghost_distances
+            id = bdry.image_distances
+            η = @. gd / id
+
+            av = selectdim(
+                a, 1, bdry.ghost_indices
+            )
+
+            av .= η .* av .+ (1.0 .- η) .* b
+        end
+
+        return
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Serialize and save a domain
+    """
+    save_domain(fname::String, dom::Domain) = serialize(fname, dom)
+
+    """
+    $TYPEDSIGNATURES
+
+    Load a domain
+    """
+    load_domain(fname::String) = deserialize(fname)
+
+    """
+    $TYPEDSIGNATURES
+
+    Clip margins from block-shaped array
+    """
+    view_clip_margins(blck::Block, a::AbstractArray) = let s = blck.size
+        nd = length(s)
+        i = [
+            (
+                i <= nd ?
+                ((blck.margin + 1):(blck.margin + s[i])) :
+                Colon()
+            ) for i = 1:ndims(a)
+        ]
+
+        view(a, i...)
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Export domain to VTK format.
+
+    Builds a folder `fname` where all of the .vtr and .vtm files are stored.
+    Kwargs are saved as cell data.
+    """
+    function export_vtk(
+        fname::String,
+        dom::Domain;
+        include_volume::Bool = true,
+        include_surface::Bool = true,
+        kwargs...
+    )
+        # create directory
+        if isdir(fname)
+            @warn "Overwrite on output dir. $fname"
+            rm(fname; recursive = true, force = true)
+        end
+        mkdir(fname)
+
+        if include_volume
+            vtm = vtk_multiblock(
+                joinpath(fname, "volume")
+            )
+
+            for part in dom.partitions
+                # for each part, obtain block-structured data
+                part_kwargs = Dict(
+                    [
+                        k => selectdim(
+                            v, 1, part.domain
+                        ) |> part for (k, v) in kwargs
+                    ]...
+                )
+
+                # create blocks
+                for (ib, block) in enumerate(part.blocks)
+                    vtk = vtk_grid(
+                        vtm,
+                        [
+                            LinRange(o, o + w, s + 1) for (o, w, s) in zip(
+                                block.origin, block.widths, block.size
+                            )
+                        ]...
+                    )
+
+                    for (k, v) in part_kwargs
+                        vblock = view_clip_margins(
+                            block, selectdim(v, 1, ib) |> copy
+                        )
+                        nd = length(block.size)
+                        vblock = permutedims( # permute dimensions to match WriteVTK convention
+                            vblock, (
+                                ((nd + 1):ndims(vblock))..., (1:nd)...
+                            )
+                        )
+
+                        vtk[String(k)] = vblock
+                    end
+                end
+            end
+
+            vtk_save(vtm)
+        end
+
+        if include_surface
+            vtm = WriteVTK.vtk_multiblock(
+                joinpath(fname, "surface")
+            )
+
+            for (sname, surf) in dom.surfaces
+                surf_kwargs = Dict(
+                    [
+                        k => let vs = surf(v)
+                            # if we have more than one dimension, reverse the first and last dimension (stl2vtk convention)
+                            if ndims(vs) > 1
+                                vs = permutedims(
+                                    vs, ((2:ndims(vs))..., 1)
+                                )
+                            end
+
+                            vs
+                        end for (k, v) in kwargs
+                    ]...
+                )
+
+                stl2vtk(
+                    joinpath(fname, sname), surf.stereolitography, vtm;
+                    surf_kwargs...
+                )
+            end
+
+            vtk_save(vtm)
+        end
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain a block-structured array with the cell centers of a partition.
+    Returns an array of shape `(nblocks, nx, ny[, nz], ndims)`
+    """
+    cell_centers(part::Partition) = let centers = Array{Float64}(
+        undef, part.size..., length(part.size) - 1
+    )
+        for (ib, block) in enumerate(part.blocks)
+            for inds in cartesian_indices(block)
+                centers[ib, inds..., :] .= cell_center(block, inds...)
+            end
+        end
+
+        centers
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain values at a given stencil point given indices and a block-structured array.
+
+    Example:
+
+    ```
+    u = rand(length(domain))
+    ux = similar(u)
+
+    domain(u, ux) do part, udom, uxdom
+        U = part(udom)
+        Ux = part(uxd)
+
+        dx, dy = part.spacing |> eachcol
+
+        Ux .= (
+            part(U, 1, 0) .- part(U, -1, 0)
+        ) ./ (2 .* dx)
+
+        ibm.update_partition!(part, uxdom, Ux)
+    end
+
+    # ux is now the first, x-axis derivative of u
     ```
     """
-    function getalong(v::AbstractArray, domain::Domain, dim::Int64, offset::Int64)
+    (part::Partition)(
+        U::AbstractArray, inds::Int...
+    ) = circshift(U, (0, (@. - inds)...))
 
-        inds = zeros(Int64, size(domain.centers, 1))
-        inds[dim] = offset
+    """
+    $TYPEDSIGNATURES
 
-        domain(v, inds...)
-
+    Obtain stencil index `i` along dimension `dim` in block-structured array.
+    `part(u, 0, 3, 0)` is equivalent to `ibm.getalong(part, u, 2, 3)`, for example
+    """
+    getalong(part::Partition, U::AbstractArray, dim::Int, i::Int) = let inds = zeros(
+        Int64, dim
+    )
+        inds[end] = i
+        part(U, inds...)
     end
-    
+
+
     """  
     Evaluate the minmod flux limiter.
     """
@@ -626,22 +1187,22 @@ module ImmersedBoundary
     $TYPEDSIGNATURES
 
     Evaluate MUSCL reconstruction at the left and right of face `i + 1/2`, as per
-    minmod flux limiter.
+    minmod flux limiter. Operates on block-structured arrays.
 
     Runs along mesh dimension `dim`.
 
     Example:
 
     ```
-    uL_i12, uR_i12 = ibm.MUSCL(u, domain, 2) # along dimension y
+    uL_i12, uR_i12 = ibm.MUSCL(partition, u, 2) # along dimension y
     ```
     """
-    function MUSCL(u::AbstractArray, domain::Domain, dim::Int64)
+    function MUSCL(part::Partition, u::AbstractArray, dim::Int64)
 
-        uim1 = getalong(u, domain, dim, -1)
-        ui = getalong(u, domain, dim, 0)
-        uip1 = getalong(u, domain, dim, 1)
-        uip2 = getalong(u, domain, dim, 2)
+        uim1 = getalong(part, u, dim, -1)
+        ui = getalong(part, u, dim, 0)
+        uip1 = getalong(part, u, dim, 1)
+        uip2 = getalong(part, u, dim, 2)
 
         uL = @. muscl_minmod(uim1, ui, uip1)
         uR = @. muscl_minmod(uip2, uip1, ui)
@@ -653,30 +1214,20 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Evaluate van-Albada flux limiter from array of properties.
+    Evaluate van-Albada flux limiter from a block-structured array of fluid properties.
 
     Runs along mesh dimension `dim`.
 
     Useful for debugging which points of your solution show first-order discretization.
     """
-    function flux_limiter(u::AbstractArray, domain::Domain, dim::Int64)
+    function flux_limiter(part::Partition, u::AbstractArray, dim::Int64)
 
-        uim1 = getalong(u, domain, dim, -1)
-        ui = getalong(u, domain, dim, 0)
-        uip1 = getalong(u, domain, dim, 1)
+        uim1 = getalong(part, u, dim, -1)
+        ui = getalong(part, u, dim, 0)
+        uip1 = getalong(part, u, dim, 1)
 
         @. minmod(ui - uim1, uip1 - ui)
 
-    end
-
-    """
-    Reshape an array to match the last dimension of another
-    """
-    _reshape_tolast(uref::AbstractVector, v::AbstractVector) = v
-    _reshape_tolast(uref::AbstractArray, v::AbstractVector) = let s = ones(Int64, ndims(uref))
-        s[end] = size(uref, ndims(uref))
-
-        reshape(v, s...)
     end
 
     """
@@ -684,8 +1235,8 @@ module ImmersedBoundary
 
     Obtain a backward derivative along dimension `dim`.
     """
-    ∇(u::AbstractArray, domain::Domain, dim::Int64) = let uim1 = getalong(u, domain, dim, -1)
-        (u .- uim1) ./ _reshape_tolast(u, view(domain.widths, dim, :))
+    ∇(part::Partition, u::AbstractArray, dim::Int64) = let uim1 = getalong(part, u, dim, -1)
+        (u .- uim1) ./ part.spacing[:, dim]
     end
 
     """
@@ -693,8 +1244,8 @@ module ImmersedBoundary
 
     Obtain a forward derivative along dimension `dim`.
     """
-    Δ(u::AbstractArray, domain::Domain, dim::Int64) = let uip1 = getalong(u, domain, dim, 1)
-        (uip1 .- u) ./ _reshape_tolast(u, view(domain.widths, dim, :))
+    Δ(part::Partition, u::AbstractArray, dim::Int64) = let uip1 = getalong(part, u, dim, 1)
+        (uip1 .- u) ./ part.spacing[:, dim]
     end
 
     """
@@ -702,9 +1253,9 @@ module ImmersedBoundary
 
     Obtain a central derivative along dimension `dim`.
     """
-    δ(u::AbstractArray, domain::Domain, dim::Int64) = let uip1 = getalong(u, domain, dim, 1)
-        (uip1 .- getalong(u, domain, dim, -1)) ./ (
-            2 .* _reshape_tolast(u, view(domain.widths, dim, :))
+    δ(part::Partition, u::AbstractArray, dim::Int64) = let uip1 = getalong(part, u, dim, 1)
+        (uip1 .- getalong(part, u, dim, -1)) ./ (
+            2 .* part.spacing[:, dim]
         )
     end
 
@@ -713,8 +1264,8 @@ module ImmersedBoundary
 
     Obtain the average of a property at face `i + 1/2` along dimension `dim`.
     """
-    μ(u::AbstractArray, domain::Domain, dim::Int64) = (
-        getalong(u, domain, dim, 1) .+ u
+    μ(part::Partition, u::AbstractArray, dim::Int64) = (
+        getalong(part, u, dim, 1) .+ u
     ) ./ 2
 
     """
@@ -722,15 +1273,15 @@ module ImmersedBoundary
 
     Run iteration of laplacian smoothing (obtain average of neighbors)
     """
-    function smooth(u::AbstractArray, domain::Domain)
+    function smooth(part::Partition, u::AbstractArray)
         uavg = similar(u)
         uavg .= 0.0
 
         cnt = 0
-        for i = 1:size(domain.centers, 1)
+        for i = 1:size(part.spacing, 2)
             cnt += 2
             uavg .+= (
-                getalong(u, domain, i, -1) .+ getalong(u, domain, i, 1)
+                getalong(part, u, i, -1) .+ getalong(part, u, i, 1)
             )
         end
 
@@ -738,680 +1289,25 @@ module ImmersedBoundary
     end
 
     """
-    $TYPEDFIELDS
-
-    Struct to accumulate values over variable-length stencils
-    """
-    struct Accumulator
-        n_output::Int32
-        stencils::Dict{Int32, Tuple}
-    end
-
-    """
     $TYPEDSIGNATURES
 
-    Construct accumulator struct from stencils and weights.
+    Obtain average of cell properties at all cell blocks in a partition.
+    Receives block-structured array (shape `(nblocks, nx, ny[, nz], inds...)`)
+    and returns another with collapsed grid dimensions (`(nblocks, 1, 1[, 1], inds...)`).
 
-    Example:
+    This makes it easier to perform coarsening of block-structured data:
 
     ```
-    acc = Accumulator(
-        [[1, 2], [2, 3, 4]],
-        [[-1.0, 2.0], [3.0, 4.0, 5.0]]
-    )
-
-    v = [1, 2, 3, 4]
-    @show acc(v)
-    # [3.0, 38.0]
+    Ucoarse .= ibm.block_average(part, U)
     ```
     """
-    function Accumulator(
-        inds::AbstractVector,
-        weights::Union{AbstractVector, Nothing} = nothing,
-    )
-        ls = length.(inds)
-
-        d = Dict{Int32, Tuple}()
-        for l in unique(ls)
-            isval = (ls .== l) |> findall
-
-            is = reduce(
-                hcat, inds[isval]
-            )
-            ws = nothing
-            if !isnothing(weights)
-                ws = reduce(
-                    hcat, weights[isval]
-                )
-            end
-
-            d[l] = (isval, is, ws)
-        end
-
-        n = length(ls)
-        Accumulator(n, d)
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Run accumulator over vector
-    """
-    function (acc::Accumulator)(v::AbstractVector)
-        vnew = similar(v, eltype(v), acc.n_output)
-
-        vnew .= 0
-        for (i, stencil, weights) in values(acc.stencils)
-            if isnothing(weights)
-                vnew[i] .= dropdims(
-                    sum(
-                        v[stencil];
-                        dims = 1
-                    );
-                    dims = 1
-                )
-            else
-                vnew[i] .= dropdims(
-                    sum(
-                        v[stencil] .* weights;
-                        dims = 1
-                    );
-                    dims = 1
-                )
-            end
-        end
-
-        vnew
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Run accumulator over array.
-    Summation occurs over last dimension
-    """
-    (acc::Accumulator)(v::AbstractArray) = mapslices(
-        acc, v; dims = ndims(v)
-    )
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain interpolator from source to destination domains.
-    Uses cell volume weighing
-    """
-    function Interpolator(
-        src::Domain, dst::Domain
-    )::Accumulator
-        idx, _ = nn(src.tree, dst.centers)
-
-        circumradii = map(norm, eachcol(dst.widths)) ./ 2
-        volumes = map(prod, eachcol(src.widths))
-
-        indices = [
-            inrange(src.tree, x, r) for (x, r) in zip(
-                eachcol(dst.centers), circumradii
-            )
-        ]
-
-        for k = 1:length(indices)
-            if length(indices[k]) == 0
-                indices[k] = [idx[k]]
-            end
-        end
-
-        weights = [
-            let v = volumes[inds]
-                v ./ sum(v)
-            end for inds in indices
-        ]
-
-        Accumulator(indices, weights)
+    block_average(part::Partition, A::AbstractArray) = let nd = length(part.size)
+        cnt = prod(part.size[2:end])
+        
+        sum(A; dims = 2:nd) ./ cnt
     end
 
     include("cfd.jl")
     using .CFD
-
-    include("arraybends.jl")
-    using .ArrayBackends
-
-    @declare_converter Interpolator
-    @declare_converter Boundary
-    @declare_converter Domain
-    @declare_converter Surface
-    @declare_converter Accumulator
-
-    """
-    $TYPEDFIELDS
-
-    Struct to describe a residual operator
-    """
-    struct BatchResidual
-        f
-        subdomains::AbstractVector{Domain}
-        indices::AbstractVector{AbstractVector{Int32}}
-        interiors::AbstractVector{AbstractVector{Int32}}
-        fringes::AbstractVector{AbstractVector{Int32}}
-        n_output::Int32
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain clone of batch residual struct with new function pointing to the same mesh
-    """
-    Base.similar(f, bf::BatchResidual) = BatchResidual(
-        f,
-        bf.subdomains, bf.indices, bf.interiors, bf.fringes, bf.n_output
-    )
-
-    """
-    $TYPEDSIGNATURES
-
-    Define residual operator.
-
-    Splits the domain into sub-domains of at most `max_size` cells
-    for "batch" evaluation.
-
-    Example:
-
-    ```
-    # last index of Q identifies cell index
-    # domain is split into subdomains of max. size 10000
-
-    residual = ibm.BatchResidual(dmn; max_size = 10000) do domain, Q
-        u, v = eachrow(Q)
-
-        ibm.impose_bc!(domain, "wall", u, v) do bdry, U, V
-            nx, ny = eachrow(bdry.normals)
-            un = @. U * nx + V * ny
-
-            (
-                U .- un .* nx,
-                V .- un .* ny
-            )
-        end
-
-        [u'; v']
-    end
-
-    Q = rand(2, length(dmn.mesh))
-    resd = residual(Q)
-    ```
-
-    Other arguments may be passed to the residual evaluation/residual function, 
-    but only a single return array is expected. As with `Q`, the last dimension
-    in each array should identify cell index.
-
-    Kwargs are passed directly to the residual function.
-    """
-    function BatchResidual(
-        f, domain::Domain;
-        max_size::Int64 = typemax(Int64),
-    )
-        nc = size(domain.centers, 2)
-
-        subdomains = [domain]
-        indices = [collect(1:nc)]
-        interiors = [collect(1:nc)]
-        fringes = [Int32[]]
-        if nc > max_size
-            indices = Mesher.partition(domain.mesh, max_size; 
-                fringe = true, include_empty = true)
-
-            fringes = Vector{Int32}[]
-            interiors = Vector{Int32}[]
-            is_fringe = falses(nc)
-            for (inds, nofringe) in zip(
-                indices,
-                Mesher.partition(domain.mesh, max_size; 
-                    fringe = false, include_empty = true)
-            )
-                view_is_fringe = @view is_fringe[inds]
-
-                is_fringe[inds] .= true
-                is_fringe[nofringe] .= false
-
-                push!(
-                    fringes, findall(view_is_fringe)
-                )
-
-                is_interior = @. !view_is_fringe
-                push!(
-                    interiors, findall(is_interior)
-                )
-
-                view_is_fringe .= false
-            end
-
-            isval = map(
-                inds -> length(inds) > 0, interiors
-            ) |> findall
-
-            indices = indices[isval]
-            interiors = interiors[isval]
-            fringes = fringes[isval]
-
-            subdomains = map(
-                part -> Domain(
-                    domain.mesh[part];
-                    ghost_distance_ratio = domain.ghost_distance_ratio,
-                    image_distance_ratio = domain.image_distance_ratio,
-                ), indices
-            )
-        end
-
-        BatchResidual(f, subdomains, indices, interiors, fringes, nc)
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain residual at partition `ipart`. Residuals at fringe cells
-    are converted to `-Q`, if `Q` is the state variable array (first arg).
-
-    Kwargs are passed on to residual function.
-    """
-    function (resd::BatchResidual)(ipart::Int64, args::AbstractArray...; kwargs...)
-        dmn = resd.subdomains[ipart]
-        fringe = resd.fringes[ipart]
-
-        r = resd.f(
-            dmn,
-            args...;
-            kwargs...
-        )
-        Q = args[1]
-
-        if size(Q) != size(r)
-            throw(error("Residual and state variable arrays have unequal shapes"))
-        end
-
-        selectdim(r, ndims(r), fringe) .= .- selectdim(Q, ndims(Q), fringe)
-
-        r
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Transport domain and fringe/interior info for a given mesh partition
-    to a given backend.
-    """
-    function part_to_backend!(br::BatchResidual, i::Int64, converter)
-        br.subdomains[i] = to_backend(br.subdomains[i], converter)
-        br.fringes[i] = to_backend(br.fringes[i], converter)
-    end
-
-    """
-    $TYPEDSIGNATURES
-    
-    Run residual evaluation given input array. The last dimension must identify
-    cell indices.
-
-    Kwargs are passed on to residual function.
-    """
-    function (resd::BatchResidual)(
-        args::AbstractArray...; 
-        conv_to_backend = nothing,
-        conv_from_backend = nothing,
-        kwargs...
-    )
-        if length(resd.subdomains) == 1
-            if !isnothing(conv_to_backend)
-                args = map(a -> to_backend(a, conv_to_backend), args)
-                part_to_backend!(resd, 1, conv_to_backend)
-            end
-
-            dmn = resd.subdomains[1]
-            R = resd.f(dmn, args...; kwargs...)
-
-            if !isnothing(conv_from_backend)
-                R = to_backend(R, conv_from_backend)
-                part_to_backend!(resd, 1, conv_from_backend)
-            end
-
-            return R
-        end
-
-        nc = resd.n_output
-
-        R = nothing
-        for (ipart, (inds, interior)) in zip(
-            resd.indices, resd.interiors
-        ) |> enumerate
-            pargs = map(
-                a -> selectdim(a, ndims(a), inds) |> copy,
-                args
-            )
-
-            if !isnothing(conv_to_backend)
-                pargs = map(
-                    a -> to_backend(a, conv_to_backend), pargs
-                )
-                part_to_backend!(resd, ipart, conv_to_backend)
-            end
-
-            r = resd(ipart, pargs...; kwargs...)
-
-            if !isnothing(conv_from_backend)
-                part_to_backend!(resd, ipart, conv_from_backend)
-                r = to_backend(r, conv_from_backend)
-            end
-
-            if isnothing(R) # define return array
-                R = similar(
-                    r, size(r)[1:(end - 1)]..., nc
-                )
-            end
-
-            vr = selectdim(R, ndims(R), inds)
-            selectdim(vr, ndims(vr), interior) .= selectdim(r, ndims(r), interior)
-        end
-
-        R
-    end
-
-    """
-    $TYPEDFIELDS
-
-    Struct to define a multigrid Newton-Krylov (GMRES) solver
-    for a non-linear equation residual.
-    """
-    struct NKSolver
-        batch_residuals::Vector{BatchResidual}
-        coarseners::Vector{Accumulator}
-        prolongators::Vector{Accumulator}
-        conv_to_backend
-        conv_from_backend
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain clone of `NKSolver` struct with new function pointing to the same mesh
-    """
-    Base.similar(f, nk::NKSolver) = NKSolver(
-        map(
-            bf -> similar(f, bf), nk.batch_residuals
-        ), nk.coarseners, nk.prolongators, nk.conv_to_backend, nk.conv_from_backend
-    )
-
-    """
-    $TYPEDSIGNATURES
-
-    Constructor for a Newton-Krylov solver.
-
-    Converters may be provided to bring arrays to and from custom backends.
-    An example is:
-
-    ```
-    conv_to_backend = x -> cu(x)
-    conv_from_backend = x -> Array(x)
-    ```
-    """
-    function NKSolver(
-        f, domains::Domain...;
-        max_size::Int64 = 1000_000_000,
-        conv_to_backend = nothing,
-        conv_from_backend = nothing,
-    )
-        domains = collect(domains)
-
-        batch_residuals = map(
-            dmn -> BatchResidual(f, dmn; max_size = max_size),
-            domains
-        )
-        
-        coarseners = Accumulator[]
-        prolongators = Accumulator[]
-
-        for i = 2:length(domains)
-            push!(
-                coarseners, Interpolator(domains[i - 1], domains[i])
-            )
-            push!(
-                prolongators, Interpolator(domains[i], domains[i - 1])
-            )
-        end
-
-        NKSolver(
-            batch_residuals, coarseners, prolongators,
-            conv_to_backend, conv_from_backend
-        )
-    end
-
-    include("gmres.jl")
-    import .GMRES
-
-    """
-    $TYPEDSIGNATURES
-
-    Use GMRES on a given partition of a batch residual struct and
-    return the ensueing correction array.
-    """
-    function batch_NK(
-        bf::BatchResidual, i::Int64, Q::AbstractArray, args::AbstractArray...;
-        h::Real = 0.0,
-        r = nothing,
-        n_iter::Int64 = 10,
-        conv_to_backend = nothing,
-        conv_from_backend = nothing,
-        kwargs...
-    )
-        if !isnothing(conv_to_backend)
-            part_to_backend!(bf, i, conv_to_backend)
-            Q = to_backend(Q, conv_to_backend)
-            args = map(
-                a -> to_backend(a, conv_to_backend), args
-            )
-            if !isnothing(r)
-                r = to_backend(r, conv_to_backend)
-            end
-        end
-
-        fringe = bf.fringes[i]
-
-        A, b = GMRES.Linearization(
-            q -> bf(i, q, args...; kwargs...),
-            Q; h = h
-        )
-
-        if !isnothing(r)
-            b .= r
-        end
-        selectdim(b, ndims(b), fringe) .= 0.0
-
-        ps, _ = GMRES.gmres(A, b, n_iter)
-
-        if !isnothing(conv_from_backend)
-            part_to_backend!(bf, i, conv_from_backend)
-            ps = to_backend(ps, conv_from_backend)
-        end
-
-        ps
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Use GMRES on each mesh partition of a batch residual struct and
-    return the ensueing correction array.
-    """
-    function batch_NK(
-        bf::BatchResidual, Q::AbstractArray, args::AbstractArray...;
-        h::Real = 0.0,
-        r = nothing,
-        n_iter::Int64 = 10,
-        conv_to_backend = nothing,
-        conv_from_backend = nothing,
-        kwargs...
-    )
-        if length(bf.subdomains) == 1
-            return batch_NK(bf, 1, Q, args...;
-                h = h, n_iter = n_iter,
-                r = r,
-                conv_to_backend = conv_to_backend,
-                conv_from_backend = conv_from_backend,
-                kwargs...)
-        end
-
-        s = similar(Q)
-        s .= 0.0
-
-        for (i, inds) in enumerate(
-            bf.indices
-        )
-            pQ = selectdim(Q, ndims(Q), inds) |> copy
-            pargs = map(
-                a -> selectdim(a, ndims(a), inds) |> copy,
-                args
-            )
-            pr = (
-                isnothing(r) ?
-                nothing :
-                selectdim(r, ndims(r), inds) |> copy
-            )
-
-            pps = batch_NK(bf, i, pQ, pargs...;
-                h = h, n_iter = n_iter,
-                r = pr, 
-                conv_from_backend = conv_from_backend,
-                conv_to_backend = conv_to_backend,
-                kwargs...)
-
-            ps = selectdim(s, ndims(s), inds)
-            ps .+= pps
-        end
-
-        s
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Recursive function for multigrid Newton system solution.
-
-    `h` (optional) is the differentiation step for Jacobian-vector prod.
-    linearization.
-    """
-    function mgrid_newton(
-        Q::AbstractArray, args::AbstractArray...;
-        bfs::AbstractVector{BatchResidual} = [],
-        coarseners::AbstractVector{Accumulator} = [],
-        prolongators::AbstractVector{Accumulator} = [],
-        conv_to_backend = nothing,
-        conv_from_backend = nothing,
-        h::Real = 0.0,
-        n_iter::Int64 = 10,
-        r = nothing,
-        kwargs...
-    )
-        bf = bfs[1]
-
-        b = nothing
-        if isnothing(r)
-            b = - bf(
-                Q, args...; 
-                conv_to_backend = conv_to_backend,
-                conv_from_backend = conv_from_backend,
-                kwargs...
-            )
-        else
-            b = r
-        end
-
-        ds = 0.0
-        if length(coarseners) > 0
-            coars = coarseners[1]
-            prolong = prolongators[1]
-
-            sc = mgrid_newton(
-                coars(Q), map(coars, args)...;
-                bfs = bfs[2:end],
-                coarseners = coarseners[2:end],
-                prolongators = prolongators[2:end],
-                conv_to_backend = conv_to_backend,
-                conv_from_backend = conv_from_backend,
-                h = h,
-                r = coars(b),
-                n_iter = n_iter,
-                kwargs...
-            )
-
-            ds = prolong(sc)
-        end
-        b = nothing # allow for deallocation if necessary
-
-        s = batch_NK(bf, Q .+ ds, args...; 
-            h = h, n_iter = n_iter,
-            conv_to_backend = conv_to_backend, 
-            conv_from_backend = conv_from_backend,
-            kwargs...)
-        s .+= ds
-
-        s
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Run Newton-Krylov solver and obtain corrections for the first input array `Q`
-    (state variables, last dimension indicating cell index).
-
-    1D example with another auxiliary field variable:
-
-    ```
-    # domains is a vector of `ibm.Domain` structs corresponding to ever coarser multigrid levels.
-
-    n_iter = 10 # number of GMRES iterations
-
-    solver = ibm.NKSolver(domains...; n_iter = n_iter) do dom, u, ν
-        uavg = (
-            dom(u, -1, 0) .+ dom(u, 1, 0) .+ dom(u, 0, -1) .+ dom(u, 0, 1)
-        ) ./ 4
-
-        ibm.impose_bc!(dom, "wall", uavg) do bdry, ui
-            ub = similar(ui)
-            ub .= 1.0
-
-            ub
-        end
-        ibm.impose_bc!(dom, "farfield", uavg) do bdry, ui
-            ui .* 0.0
-        end
-
-        (uavg .- u) .* ν
-    end
-
-    ν = fill(2.0, length(msh))
-    u = zeros(length(msh))
-
-    for _ = 1:10 # 10 iterations
-        # solver returns approx. linear corrections:
-        u .+= solver(u, ν)
-    end
-    ```
-
-    Kwargs are passed to residual functions.
-
-    `h` is the step length for linearization purposes.
-    """
-    (solver::NKSolver)(
-        Q::AbstractArray, args::AbstractArray...;
-        h::Real = 0.0,
-        n_iter::Int64 = 10,
-        kwargs...
-    ) = mgrid_newton(
-        Q, args...;
-        bfs = solver.batch_residuals,
-        coarseners = solver.coarseners,
-        prolongators = solver.prolongators,
-        conv_to_backend = solver.conv_to_backend,
-        conv_from_backend = solver.conv_from_backend,
-        h = h,
-        n_iter = n_iter,
-        kwargs...
-    )
 
 end

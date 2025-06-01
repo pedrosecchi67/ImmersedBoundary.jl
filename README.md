@@ -1,6 +1,7 @@
 # ImmersedBoundary.jl
 
-A comprehensive module for Immersed Boundary Method implementations in Julia.
+A comprehensive module for Immersed Boundary Method implementations in Julia
+and their parallelization via SIMD GPU computing.
 
 ## Installation
 
