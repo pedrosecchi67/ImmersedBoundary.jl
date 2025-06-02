@@ -1368,12 +1368,12 @@ module ImmersedBoundary
         prims = CFD.state2primitive(fluid, state...)
 
         nd = length(prims) - 2
-        if laminar
+        if laminar # if laminar, zero at wall!
             for i = 1:nd
                 u = prims[i + 2] 
                 u .= 0.0
             end
-        else
+        else # else, obtain normal component of velocity and remove it
             un = similar(prims[1])
             un .= 0.0
 
@@ -1391,7 +1391,7 @@ module ImmersedBoundary
                 @. u -= n * un
             end
 
-            if !isnothing(du!dn)
+            if !isnothing(du!dn) # if we have a non-zero velocity gradient, impose it
                 V = similar(prims[1])
                 V .= 0.0
 
@@ -1407,7 +1407,8 @@ module ImmersedBoundary
 
                 for i = 1:nd
                     u = prims[i + 2]
-                    @. u *= Vratio
+                    @. u *= Vratio # I'm using this ratio as a trick to impose the gradient
+                    # in the direction of velocity
                 end
             end
         end
@@ -1439,6 +1440,7 @@ module ImmersedBoundary
 
         nd = length(vels)
 
+        # obtain normal velocity to decide if we're at an inlet or outlet:
         un = similar(p)
         un .= 0.0
 
