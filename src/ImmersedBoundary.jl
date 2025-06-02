@@ -953,7 +953,7 @@ module ImmersedBoundary
         bargs = f(bdry, bdry.image_interpolator.(pargs)...; kwargs...)
 
         if !(bargs isa Tuple)
-            if bargs isa AbstractVector && first(bargs) isa AbstractArray
+            if bargs isa AbstractVector && eltype(bargs) <: AbstractArray
                 bargs = tuple(bargs...)
             else
                 bargs = (bargs,)
