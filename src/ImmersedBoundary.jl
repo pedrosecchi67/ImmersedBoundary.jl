@@ -1360,13 +1360,27 @@ module ImmersedBoundary
     Run wall boundary condition on state variables.
     Imposes vel. gradient if specified, or laminar (Dirichlet 0) wall
     if `laminar = true`. Otherwise, uses an Euler wall.
+
+    Velocity gradients may be given by passing function `du!dn` as a kwarg.
+    The function should have the format:
+    
+    ```
+    dV!dn = du!dn(bdry, V, Q, args...; kwargs...)
+    ```
+
+    Where `V = |u|` is the non-normal velocity magnitude at the image points, 
+    and the return value is its gradient normal to the wall.
+    Note that all kwargs and extra args are passed to the function, as well as 
+    the state variables.
     """
     function wall_bc(
         bdry::Boundary,
         Q::AbstractMatrix{Float64},
-        du!dn::Union{Nothing, AbstractVector{Float64}} = nothing;
+        args::AbstractArray...;
         laminar::Bool = false,
-        fluid::CFD.Fluid
+        du!dn = nothing,
+        fluid::CFD.Fluid,
+        kwargs...
     )
         state = eachcol(Q)
         prims = CFD.state2primitive(fluid, state...)
@@ -1407,7 +1421,8 @@ module ImmersedBoundary
                 @. V = sqrt(V)
 
                 ϵ = eps(Float64)
-                Vratio = @. (V - du!dn * bdry.image_distances) / (V + ϵ)
+                dV!dn = du!dn(bdry, V, Q, args...; kwargs...)
+                Vratio = @. (V - dV!dn * bdry.image_distances) / (V + ϵ)
 
                 for i = 1:nd
                     u = prims[i + 2]
