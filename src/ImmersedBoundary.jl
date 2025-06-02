@@ -448,6 +448,10 @@ module ImmersedBoundary
             end
         end
 
+        if !(families isa AbstractDict)
+            families = Dict(families...)
+        end
+
         if haskey(stl_dict, "surface") || haskey(families, "surface")
             throw(error("Surface/family name \'surface\' is reserved"))
         end
