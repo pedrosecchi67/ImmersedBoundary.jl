@@ -348,4 +348,10 @@ For easier implementation of CFD codes, you may use the module `ImmersedBoundary
 ?ibm.CFD.AUSM
 ?ibm.CFD.JSTKE
 ?ibm.CFD.pressure_coefficient
+?ibm.CFD.Freestream
+?ibm.CFD.initial_guess
+?ibm.CFD.rotate_and_rescale!
+?CFD.timescale
+?CFD.wall_bc
+?CFD.freestream_bc
 ```

@@ -60,5 +60,48 @@ dom(uv, uvcoarse, k) do part, uvdom, uvcoarse_dom, kdom
 
 end
 
+fluid = ibm.CFD.Fluid()
+free_old = ibm.CFD.Freestream(fluid, 0.5, 0.0)
+free = ibm.CFD.Freestream(fluid, 0.5, 2.0)
+
+ρ, E, ρu, ρv = ibm.CFD.initial_guess(free_old, length(dom))
+ibm.CFD.rotate_and_rescale!(free_old, free, ρ, E, ρu, ρv)
+
+Q = [ρ E ρu ρv]
+
+dt = ibm.timescale(dom, fluid, Q) |> minimum
+
+let Qnew = copy(Q)
+    dom(Q, Qnew) do part, Qdom, Qnewdom
+        Qblock = part(Qdom)
+        Qnewblock = part(Qnewdom)
+
+        for i = 1:2
+            Ql, Qr = ibm.MUSCL(part, Qblock, i)
+
+            Qnewblock .-= dt .* ibm.∇(part, ibm.CFD.HLL(Ql, Qr, i, fluid), i)
+        end
+
+        ibm.impose_bc!(
+            ibm.wall_bc,
+            part, "wall",
+            Qnewblock; fluid = fluid
+        )
+        ibm.impose_bc!(
+            ibm.freestream_bc,
+            part, "FARFIELD",
+            Qnewblock;
+            freestream = free
+        )
+
+        ibm.update_partition!(part, Qnewdom, Qnewblock)
+    end
+
+    Q .= Qnew
+end
+
+ρ, E, ρu, ρv = eachcol(Q)
+
 ibm.export_vtk("n0012_results", dom;
-    uv = uv, uvcoarse = uvcoarse, k = k)
+    uv = uv, uvcoarse = uvcoarse, k = k,
+    rho = ρ, E = E, rhou = ρu, rhov = ρv)

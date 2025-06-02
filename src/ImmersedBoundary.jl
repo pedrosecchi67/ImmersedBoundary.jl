@@ -1310,4 +1310,162 @@ module ImmersedBoundary
     include("cfd.jl")
     using .CFD
 
+    """
+    $TYPEDSIGNATURES
+
+    Obtain time step length for CFL = 1 at each cell. Returns a vector.
+    """
+    timescale(
+        dom::Domain,
+        fluid::CFD.Fluid,
+        Q::AbstractMatrix{Float64};
+        conv_to_backend = nothing,
+        conv_from_backend = nothing
+    ) = let dt = Vector{Float64}(undef, length(dom))
+        dom(
+            Q, dt;
+            conv_to_backend = conv_to_backend,
+            conv_from_backend = conv_from_backend
+        ) do part, Qdom, dtdom
+            dtblock = part(dtdom)
+            Qblock = part(Qdom)
+
+            prims = CFD.state2primitive(fluid, eachslice(Qblock; dims = ndims(Qblock))...)
+
+            dtblock .= Inf64
+
+            nd = length(prims) - 2
+
+            a = CFD.speed_of_sound(fluid, prims[2])
+            for i = 1:nd
+                v = prims[2 + i]
+                dx = @view part.spacing[:, i]
+
+                @. dtblock = min(dtblock, dx / (abs(v) + a) / 2)
+            end
+
+            update_partition!(part, dtdom, dtblock)
+        end
+
+        dt
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Run wall boundary condition on state variables.
+    Imposes vel. gradient if specified, or laminar (Dirichlet 0) wall
+    if `laminar = true`. Otherwise, uses an Euler wall.
+    """
+    function wall_bc(
+        bdry::Boundary,
+        Q::AbstractMatrix{Float64},
+        du!dn::Union{Nothing, AbstractVector{Float64}} = nothing;
+        laminar::Bool = false,
+        fluid::CFD.Fluid
+    )
+        state = eachcol(Q)
+        prims = CFD.state2primitive(fluid, state...)
+
+        nd = length(prims) - 2
+        if laminar
+            for i = 1:nd
+                u = prims[i + 2] 
+                u .= 0.0
+            end
+        else
+            un = similar(prims[1])
+            un .= 0.0
+
+            for i = 1:nd
+                u = prims[i + 2]
+                n = @view bdry.normals[:, i]
+
+                @. un += n * u
+            end
+
+            for i = 1:nd
+                u = prims[i + 2]
+                n = @view bdry.normals[:, i]
+
+                @. u -= n * un
+            end
+
+            if !isnothing(du!dn)
+                V = similar(prims[1])
+                V .= 0.0
+
+                for i = 1:nd
+                    u = prims[i + 2]
+                    @. V += u ^ 2
+                end
+
+                @. V = sqrt(V)
+
+                ϵ = eps(Float64)
+                Vratio = @. (V - du!dn * bdry.image_distances) / (V + ϵ)
+
+                for i = 1:nd
+                    u = prims[i + 2]
+                    @. u *= Vratio
+                end
+            end
+        end
+
+        CFD.primitive2state(fluid, prims...) |> x -> hcat(x...)
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Run freestream boundary condition on state variables.
+    """
+    function freestream_bc(
+        bdry::Boundary,
+        Q::AbstractMatrix{Float64};
+        freestream::CFD.Freestream
+    )
+        fluid = freestream.fluid
+        free = freestream # an alias
+
+        state = eachcol(Q)
+        prims = CFD.state2primitive(fluid, state...)
+
+        p = prims[1]
+        T = prims[2]
+        vels = prims[3:end]
+
+        a = CFD.speed_of_sound(fluid, T)
+
+        nd = length(vels)
+
+        un = similar(p)
+        un .= 0.0
+
+        for i = 1:nd
+            u = vels[i]
+            n = @view bdry.normals[:, i]
+
+            @. un += n * u
+        end
+
+        # for temperature and velocities, use Dirichlet BC at inlet
+        dirichlet = @. un > 0.0
+
+        @. T = dirichlet * free.T + (1.0 - dirichlet) * T
+        for i = 1:nd
+            u = vels[i]
+            uf = free.v[i]
+            
+            @. dirichlet * uf + (1.0 - dirichlet) * u
+        end
+
+        # for pressure, invert if subsonic
+        @. dirichlet = dirichlet != (abs(un) < a)
+
+        @. p = dirichlet * free.p + (1.0 - dirichlet) * p
+
+        CFD.primitive2state(fluid, prims...) |> x -> hcat(x...)
+    end
+
 end

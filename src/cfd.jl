@@ -1,6 +1,8 @@
 module CFD
 
-    using DocStringExtensions
+    using ..LinearAlgebra
+
+    using ..DocStringExtensions
 
     """
     $TYPEDFIELDS
@@ -131,7 +133,13 @@ module CFD
     notation (first dim. as state variable). Also returns original array size.
     """
     block2mat(a::AbstractArray) = (
-        ndims(a) == 2 ? (a, nothing) : (
+        (
+            ndims(a) == 2 && let n = size(a, 1)
+                @assert n != size(a, 2) "Too few cells for residual calculation"
+
+                (n in (4, 5))
+            end
+        ) ? (a, nothing) : (
             (reshape(a, :, size(a, ndims(a))) |> transpose), size(a)
         )
     )
@@ -266,21 +274,6 @@ module CFD
     """
     $TYPEDSIGNATURES
 
-    Obtain pressure coefficients throughout the field
-    as a function of pressure throughout the field, freestream pressure
-    and freestream Mach number.
-    """
-    function pressure_coefficient(fluid::Fluid, p, p∞::Float64, M∞::Float64)
-
-        γ = fluid.γ
-
-        Cp = @. 2 * (p / p∞ - 1.0) / (M∞ ^ 2 * γ)
-
-    end
-
-    """
-    $TYPEDSIGNATURES
-
     JST-KE scheme fluxes
     """
     function JSTKE(
@@ -328,6 +321,166 @@ module CFD
 
         (@. E + (Qi - Qip1) * (ν * λ)' / 2) |> x -> mat2block(x, bsize)
 
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain pressure coefficients throughout the field
+    as a function of pressure throughout the field, freestream pressure
+    and freestream Mach number.
+    """
+    function pressure_coefficient(fluid::Fluid, p, p∞::Float64, M∞::Float64)
+
+        γ = fluid.γ
+
+        Cp = @. 2 * (p / p∞ - 1.0) / (M∞ ^ 2 * γ)
+
+    end
+
+    """
+    $TYPEDFIELDS
+
+    Struct with freestream properties
+    """
+    struct Freestream
+        fluid::Fluid
+        p::Float64
+        T::Float64
+        v::Union{Tuple{Float64, Float64}, Tuple{Float64, Float64, Float64}}
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain `Freestream` struct from external flow conditions.
+    Uses 3D flow if `β` is provided
+    """
+    function Freestream(
+        fluid::Fluid, M∞::Float64, α::Float64, 
+        β::Union{Float64, Nothing} = nothing;
+        p::Float64 = 1e5, T::Float64 = 288.15
+    )
+        a = speed_of_sound(fluid, T)
+
+        Freestream(
+            fluid, p, T,
+            (
+                isnothing(β) ?
+                (cosd(α), sind(α)) .* (M∞ * a) :
+                (
+                    cosd(α) * cosd(β), 
+                    - sind(β) * cosd(α),
+                    sind(α)
+                ) .* (M∞ * a)
+            )
+        )
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain initial guess (state variables) for an N-cell mesh given
+    freestream properties
+    """
+    initial_guess(free::Freestream, N::Int64) = primitive2state(
+        free.fluid,
+        fill(free.p, N), fill(free.T, N),
+        [
+            fill(vv, N) for vv in free.v
+        ]...
+    )
+
+    _gram_schmidt(
+        u::Tuple
+    ) = let u = collect(u)
+        nu = norm(u)
+
+        if nu > eps(eltype(u))
+            u ./= nu
+        else
+            u .= 0.0
+            u[1] = 1.0
+        end
+
+        v = similar(u)
+        v .= 0.0
+        v[2] = 1.0
+
+        v .-= (v ⋅ u) .* u
+
+        nv = norm(v)
+
+        if nv > eps(eltype(u))
+            v ./= nv
+        else
+            v .= 0.0
+            v[1] = 1.0
+        end
+
+        if length(u) == 2
+            return [u v]
+        end
+
+        [
+            u v cross(u, v)
+        ]
+    end
+
+    _tocoords(M::AbstractMatrix, u, v) = (
+        u .* M[1, 1] .+ v .* M[2, 1],
+        u .* M[1, 2] .+ v .* M[2, 2]
+    )
+    _tocoords(M::AbstractMatrix, u, v, w) = (
+        u .* M[1, 1] .+ v .* M[2, 1] .+ w .* M[3, 1],
+        u .* M[1, 2] .+ v .* M[2, 2] .+ w .* M[3, 2],
+        u .* M[1, 3] .+ v .* M[2, 3] .+ w .* M[3, 3],
+    )
+
+    _fromcoords(M::AbstractMatrix, u...) = _tocoords(M', u...)
+
+    """
+    $TYPEDSIGNATURES
+
+    Rotate and rescale state variables to match new freestream properties
+    """
+    function rotate_and_rescale!(
+        old::Freestream, new::Freestream, ρ::AbstractArray, E::AbstractArray, ρvs::AbstractArray...
+    )
+        state_old = primitive2state(
+            old.fluid, old.p, old.T, old.v...
+        )
+        state_new = primitive2state(
+            new.fluid, new.p, new.T, new.v...
+        )
+
+        Mold = _gram_schmidt(old.v)
+        Mnew = _gram_schmidt(new.v)
+
+        ρ .*= (state_new[1] / state_old[1])
+        E .*= (state_new[2] / state_old[2])
+
+        ρV_ratio = (state_new[1] / state_old[1]) * (
+            norm(new.v) / (norm(old.v) + eps(Float64))
+        )
+
+        Mold = _gram_schmidt(old.v)
+        Mnew = _gram_schmidt(new.v)
+
+        for ρv in ρvs
+            ρv .*= ρV_ratio
+        end
+
+        for (v, vnew) in zip(
+            ρvs,
+            _fromcoords(
+                Mnew, _tocoords(
+                    Mold, ρvs...
+                )...
+            )
+        )
+            v .= vnew
+        end
     end
 
     """

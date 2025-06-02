@@ -1,96 +1,116 @@
-import ImmersedBoundary.Mesher as mshr
+import ImmersedBoundary as ibm
+using LinearAlgebra
+
+@info "Running NACA-0012 mesh and operator test..."
+
 import ImmersedBoundary as ibm
 
 using CUDA
 
-stl = mshr.Stereolitography("n0012.dat")
+stl = ibm.Stereolitography("n0012.dat")
 
 L = 20.0
 
-meshes = mshr.Multigrid(
-    5, 
-    [-L/2,-L/2], [L,L],
+dom = ibm.Domain(
+    [-L/2, -L/2], [L, L],
     ("wall", stl, 0.001);
-    verbose = true,
-    farfield_boundaries = [
-        "farfield" => [(1, false), (1, true), (2, false), (2, true)]
-    ],
     refinement_regions = [
-        mshr.Ball([0.0, 0.0], 0.01) => 0.00025,
-        mshr.Ball([1.0, 0.0], 0.01) => 0.00025,
+        ibm.Ball([0.0, 0.0], 0.0) => 0.00025,
+        ibm.Ball([1.0, 0.0], 0.0) => 0.00025,
     ]
 )
 
-msh = meshes[1]
-domains = ibm.Domain.(meshes)
+@info "$(length(dom)) non-blanked, non-margin cells"
 
-dmn = domains[1]
-dmn_coarse = domains[end]
+dom = ibm.save_domain("dom.ibm", dom)
+dom = ibm.load_domain("dom.ibm")
 
-residual = ibm.BatchResidual(
-    dmn; 
-    max_size = 10000
-) do domain, Q
-    domain = ibm.to_backend(domain, CuArray)
-    Q = CuArray(Q)
+uv = zeros(length(dom), 2)
+uv[:, 1] .= 1.0
+uvcoarse = copy(uv)
+k = zeros(length(dom))
 
-    u, v = eachrow(Q)
+dom(uv, uvcoarse, k;
+    conv_to_backend = CuArray,
+    conv_from_backend = Array) do part, uvdom, uvcoarse_dom, kdom
 
-    ibm.impose_bc!(domain, "wall", u, v) do bdry, U, V
-        nx, ny = eachrow(bdry.normals)
-        un = @. U * nx + V * ny
+    UV = part(uvdom)
+    UVc = part(uvcoarse_dom)
+    K = part(kdom)
+
+    ibm.impose_bc!(part, "wall", UV, K) do bdry, uvi, ki
+        u, v = eachcol(uvi)
+        nx, ny = eachcol(bdry.normals)
+
+        uvn = @. u * nx + v * ny
+
+        kb = similar(ki)
+        kb .= 1.0
 
         (
-            U .- un .* nx,
-            V .- un .* ny
+            uvi .- uvn .* bdry.normals, kb
         )
     end
 
-    [u'; v'] |> Array
-end
+    ibm.impose_bc!(part, "FARFIELD", K) do bdry, ki
+        kb = similar(ki)
+        kb .= 0.0
 
-Q = zeros(2, length(msh))
-Q[1, :] .= 1.0
-R = residual(Q)
-
-@info "Timing residual"
-for _ = 1:10
-    @time residual(Q)
-end
-
-solver = ibm.NKSolver(
-    domains...;
-    conv_to_backend = CuArray,
-    conv_from_backend = Array,
-    max_size = 10000
-) do dom, u, ν
-    uavg = (
-        dom(u, -1, 0) .+ dom(u, 1, 0) .+ dom(u, 0, -1) .+ dom(u, 0, 1)
-    ) ./ 4
-
-    ibm.impose_bc!(dom, "wall", uavg) do bdry, ui
-        ub = similar(ui)
-        ub .= 1.0
-
-        ub
-    end
-    ibm.impose_bc!(dom, "farfield", uavg) do bdry, ui
-        ui .* 0.0
+        kb
     end
 
-    (uavg .- u) .* ν
+    UVc .= ibm.block_average(part, UV)
+
+    ibm.update_partition!(part, uvdom, UV)
+    ibm.update_partition!(part, uvcoarse_dom, UVc)
+    ibm.update_partition!(part, kdom, K)
+
 end
 
-ν = fill(2.0, length(msh))
-u = zeros(length(msh))
+fluid = ibm.CFD.Fluid()
+free_old = ibm.CFD.Freestream(fluid, 0.5, 0.0)
+free = ibm.CFD.Freestream(fluid, 0.5, 2.0)
 
-@info "Timing solver"
-for _ = 1:10 # 10 iterations
-    @time u .+= solver(u, ν)
+ρ, E, ρu, ρv = ibm.CFD.initial_guess(free_old, length(dom))
+ibm.CFD.rotate_and_rescale!(free_old, free, ρ, E, ρu, ρv)
+
+Q = [ρ E ρu ρv]
+
+dt = ibm.timescale(dom, fluid, Q) |> minimum
+
+let Qnew = copy(Q)
+    dom(Q, Qnew;
+        conv_to_backend = CuArray,
+        conv_from_backend = Array) do part, Qdom, Qnewdom
+        Qblock = part(Qdom)
+        Qnewblock = part(Qnewdom)
+
+        for i = 1:2
+            Ql, Qr = ibm.MUSCL(part, Qblock, i)
+
+            Qnewblock .-= dt .* ibm.∇(part, ibm.CFD.HLL(Ql, Qr, i, fluid), i)
+        end
+
+        ibm.impose_bc!(
+            ibm.wall_bc,
+            part, "wall",
+            Qnewblock; fluid = fluid
+        )
+        ibm.impose_bc!(
+            ibm.freestream_bc,
+            part, "FARFIELD",
+            Qnewblock;
+            freestream = free
+        )
+
+        ibm.update_partition!(part, Qnewdom, Qnewblock)
+    end
+
+    Q .= Qnew
 end
 
-vtk = mshr.vtk_grid("n0012", msh; u = u, R = R)
-mshr.vtk_save(vtk)
+ρ, E, ρu, ρv = eachcol(Q)
 
-vtk = mshr.vtk_grid("n0012_coarse", meshes[end])
-mshr.vtk_save(vtk)
+ibm.export_vtk("n0012_results", dom;
+    uv = uv, uvcoarse = uvcoarse, k = k,
+    rho = ρ, E = E, rhou = ρu, rhov = ρv)
