@@ -45,11 +45,11 @@ module CFD
         ρ, E, ρu...
     )
 
-        u = map(ρuᵢ -> (ρuᵢ ./ ρ), ρu)
+        u = map(ρui -> (ρui ./ ρ), ρu)
 
         vel = sqrt.(
             sum(
-                uᵢ -> uᵢ .^ 2,
+                ui -> ui .^ 2,
                 u
             )
         )
@@ -93,7 +93,7 @@ module CFD
 
         vel = sqrt.(
             sum(
-                uᵢ -> uᵢ .^ 2,
+                ui -> ui .^ 2,
                 u
             )
         )
@@ -101,7 +101,7 @@ module CFD
         Cv = fld.R / (fld.γ - 1.0)
         et = @. ((Cv * T + vel ^ 2 / 2) * ρ)
 
-        ρu = map(uᵢ -> ρ .* uᵢ, u)
+        ρu = map(ui -> ρ .* ui, u)
 
         (ρ, et, ρu...)
 
@@ -140,7 +140,7 @@ module CFD
                 (n in (4, 5))
             end
         ) ? (a, nothing) : (
-            (reshape(a, :, size(a, ndims(a))) |> transpose), size(a)
+            (reshape(a, :, size(a, ndims(a))) |> permutedims), size(a)
         )
     )
 
@@ -152,7 +152,7 @@ module CFD
     """
     mat2block(a::AbstractMatrix, s::Union{Tuple, Nothing}) = (
         isnothing(s) ? a : (
-            reshape(transpose(a), s...)
+            reshape(permutedims(a), s...)
         )
     )
 
