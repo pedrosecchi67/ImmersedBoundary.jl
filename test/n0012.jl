@@ -85,7 +85,11 @@ let Qnew = copy(Q)
         ibm.impose_bc!(
             ibm.wall_bc,
             part, "wall",
-            Qnewblock; fluid = fluid
+            Qnewblock; fluid = fluid,
+            du!dn = (b, v, q) -> let dv = similar(v)
+                dv .= 100.0
+                dv
+            end
         )
         ibm.impose_bc!(
             ibm.freestream_bc,
