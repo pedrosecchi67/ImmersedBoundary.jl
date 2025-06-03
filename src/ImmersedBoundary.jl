@@ -275,6 +275,7 @@ module ImmersedBoundary
         domain::AbstractVector{Int32}
         image::AbstractVector{Int32}
         in_domain::AbstractVector{Int32}
+        is_in_domain::AbstractArray{Bool}
         blocks::AbstractVector{Block}
         boundaries::Dict{String, Boundary}
     end
@@ -713,6 +714,7 @@ module ImmersedBoundary
                     dom,
                     idx_indom,
                     local_idx_indom,
+                    reshape(indom, part_size...),
                     blocks[prange],
                     boundaries
                 )
@@ -1305,10 +1307,12 @@ module ImmersedBoundary
     Ucoarse .= ibm.block_average(part, U)
     ```
     """
-    block_average(part::Partition, A::AbstractArray) = let nd = length(part.size)
-        cnt = prod(part.size[2:end])
-        
-        sum(A; dims = 2:nd) ./ cnt
+    block_average(part::Partition, A::AbstractArray; include_blank::Bool = false) = let nd = length(part.size)
+        sum(A .* part.is_in_domain; dims = 2:nd) ./ (
+                include_blank ?
+                prod(part.block_size) :
+                sum(part.is_in_domain; dims = 2:nd)
+        )
     end
 
     include("cfd.jl")

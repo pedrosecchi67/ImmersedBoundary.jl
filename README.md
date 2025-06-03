@@ -321,7 +321,7 @@ dom(r, u) do part, rdom, udom
     # calculate residual R somehow
 
     # "coarsen" by taking the average of each mesh block:
-    R .= ibm.block_average(part, R)
+    R .= ibm.block_average(part, R; include_blank = true)
 
     # rescale time-step by using part.block_size
     # to obtain a coarse/fine mesh size ratio:
