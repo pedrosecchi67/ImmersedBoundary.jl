@@ -1345,7 +1345,7 @@ module ImmersedBoundary
                 v = prims[2 + i]
                 dx = @view part.spacing[:, i]
 
-                @. dtblock = min(dtblock, dx / (abs(v) + a) / 2)
+                @. dtblock = min(dtblock, dx / (abs(v) + a))
             end
 
             update_partition!(part, dtdom, dtblock)
