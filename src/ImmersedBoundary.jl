@@ -417,7 +417,7 @@ module ImmersedBoundary
         maxwidth = max(block_sizes...)
 
         if verbose
-            println("Generating octree...")
+            println("Generating octree at level $_mgrid_depth...")
         end
         msh = mshr.FixedMesh(
             origin, widths,
@@ -781,12 +781,14 @@ module ImmersedBoundary
         # return coarsener and prolongator if in a coarse mesh
         if !isnothing(_previous_pts_tree)
             if verbose
-                println("Building coarseners/prolongators...")
+                println("Building coarseners/prolongators at level $_mgrid_depth...")
             end
             fine_X, fine_tree = _previous_pts_tree
 
-            coarsener = Interpolator(fine_X, X_in_domain, fine_tree)
-            prolongator = Interpolator(X_in_domain, fine_X, tree)
+            coarsener = Interpolator(fine_X, X_in_domain, fine_tree; 
+                linear = false, first_index = true)
+            prolongator = Interpolator(X_in_domain, fine_X, tree;
+                linear = false, first_index = true)
 
             return (coarsener, dom, prolongator)
         end
