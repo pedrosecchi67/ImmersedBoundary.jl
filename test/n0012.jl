@@ -12,7 +12,9 @@ dom = ibm.Domain(
     refinement_regions = [
         ibm.Ball([0.0, 0.0], 0.0) => 0.00025,
         ibm.Ball([1.0, 0.0], 0.0) => 0.00025,
-    ]
+    ],
+    multigrid_levels = 3,
+    verbose = true
 )
 
 @info "$(length(dom)) non-blanked, non-margin cells"
