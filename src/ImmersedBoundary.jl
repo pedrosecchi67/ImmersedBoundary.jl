@@ -780,6 +780,9 @@ module ImmersedBoundary
 
         # return coarsener and prolongator if in a coarse mesh
         if !isnothing(_previous_pts_tree)
+            if verbose
+                println("Building coarseners/prolongators...")
+            end
             fine_X, fine_tree = _previous_pts_tree
 
             coarsener = Interpolator(fine_X, X_in_domain, fine_tree)
