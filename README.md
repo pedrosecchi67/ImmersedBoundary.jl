@@ -347,7 +347,7 @@ function solve_multigrid(dom, Q, R)
 
     # solve on coarse level and prolongate
     coarsener, dom_coarse, prolongator = dom.multigrid
-    dQ = solve(dom_coarse, coarsener(Q), coarsener(R)) |> prolongator
+    dQ = solve_multigrid(dom_coarse, coarsener(Q), coarsener(R)) |> prolongator
 
     dQ .+= solve(dom, Q, R) # solve for residual on current level
 
