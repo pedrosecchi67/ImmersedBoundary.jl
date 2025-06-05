@@ -2,6 +2,16 @@
 
 import ImmersedBoundary as ibm
 
+function coarsen_prolongate(dom::ibm.Domain, Q::AbstractArray)
+    if isnothing(dom.multigrid)
+        return Q
+    end
+
+    coars, domc, prolong = dom.multigrid
+
+    coars(Q) |> q -> coarsen_prolongate(domc, q) |> prolong
+end
+
 stl = ibm.Stereolitography("n0012.dat")
 
 L = 20.0
@@ -12,7 +22,9 @@ dom = ibm.Domain(
     refinement_regions = [
         ibm.Ball([0.0, 0.0], 0.0) => 0.00025,
         ibm.Ball([1.0, 0.0], 0.0) => 0.00025,
-    ]
+    ],
+    multigrid_levels = 3,
+    verbose = true
 )
 
 @info "$(length(dom)) non-blanked, non-margin cells"
@@ -59,6 +71,8 @@ dom(uv, uvcoarse, k) do part, uvdom, uvcoarse_dom, kdom
     ibm.update_partition!(part, kdom, K)
 
 end
+
+kmgrid = coarsen_prolongate(dom, k)
 
 fluid = ibm.CFD.Fluid()
 free_old = ibm.CFD.Freestream(fluid, 0.5, 0.0)
@@ -107,5 +121,5 @@ end
 ρ, E, ρu, ρv = eachcol(Q)
 
 ibm.export_vtk("n0012_results", dom;
-    uv = uv, uvcoarse = uvcoarse, k = k,
+    uv = uv, uvcoarse = uvcoarse, k = k, kmgrid = kmgrid,
     rho = ρ, E = E, rhou = ρu, rhov = ρv)

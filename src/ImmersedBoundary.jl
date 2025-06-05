@@ -293,6 +293,10 @@ module ImmersedBoundary
         boundary_distances::AbstractDict
         surfaces::AbstractDict
         partitions::AbstractVector{Partition}
+        multigrid::Union{
+            Nothing,
+            Tuple{Interpolator, Domain, Interpolator}
+        }
     end
 
     """
@@ -357,7 +361,8 @@ module ImmersedBoundary
     * A point reference within the domain. If absent, external flow is assumed;
     * An approximation ratio between wall distance and cell circumradius past which
         distance functions are approximated; 
-    * A maximum number of octree blocks per partition; and
+    * A maximum number of octree blocks per partition;
+    * A number of multigrid levels; and
     * A set of families defining surface groups for postprocessing, BC imposition and wall
         distance calculations.
 
@@ -398,7 +403,10 @@ module ImmersedBoundary
             approximation_ratio::Float64 = 2.0,
             verbose::Bool = false,
             max_partition_blocks::Int64 = 1000,
+            multigrid_levels::Int64 = 0,
             families = nothing,
+            _previous_pts_tree = nothing,
+            _mgrid_depth::Int64 = 0,
     )
         nd = length(origin)
         if block_sizes isa Number # if it's an int, use it for all dimensions
@@ -409,7 +417,7 @@ module ImmersedBoundary
         maxwidth = max(block_sizes...)
 
         if verbose
-            println("Generating octree...")
+            println("Generating octree at level $_mgrid_depth...")
         end
         msh = mshr.FixedMesh(
             origin, widths,
@@ -425,6 +433,7 @@ module ImmersedBoundary
             interior_point = interior_point,
             approximation_ratio = approximation_ratio,
             verbose = verbose,
+            _mgrid_depth = _mgrid_depth,
         )
 
         stl_dict = Dict( # store all STLs in a dictionary. We'll need them later for fam. construction
@@ -730,24 +739,62 @@ module ImmersedBoundary
             )[in_domain]
         end
 
-        # sinally,  let's create surface structs 
+        # finally,  let's create surface structs 
         surface_dict = Dict{String, Surface}()
-        for (sname, stl, L) in surfaces
-            surface_dict[sname] = Surface(
-                X_in_domain, tree, stl;
-                max_length = L
+        # only for fine level!! No pproc on coarse levels!
+        if _mgrid_depth == 0
+            for (sname, stl, L) in surfaces
+                surface_dict[sname] = Surface(
+                    X_in_domain, tree, stl;
+                    max_length = L
+                )
+            end
+        end
+
+        # if we have more multigrid levels to construct, add coarser multigrid field
+        multigrid = nothing
+        if _mgrid_depth < multigrid_levels
+            multigrid = Domain(
+                    origin, widths, surfaces...;
+                    margin = margin, block_sizes = block_sizes,
+                    refinement_regions = refinement_regions, max_length = max_length,
+                    ghost_layer_ratio = ghost_layer_ratio, interior_point = interior_point,
+                    approximation_ratio = approximation_ratio, verbose = verbose,
+                    max_partition_blocks = max_partition_blocks, 
+                    multigrid_levels = multigrid_levels, families = families,
+                    _previous_pts_tree = (X_in_domain, tree),
+                    _mgrid_depth = _mgrid_depth + 1,
             )
         end
 
-        Domain(
+        dom = Domain(
             n_in_domain,
             array_size,
             (msh.widths ./ block_sizes) |> permutedims,
             blocks,
             boundary_sdfs,
             surface_dict,
-            partitions
+            partitions,
+            multigrid
         )
+
+        # return coarsener and prolongator if in a coarse mesh
+        if !isnothing(_previous_pts_tree)
+            if verbose
+                println("Building coarseners/prolongators at level $_mgrid_depth...")
+            end
+            fine_X, fine_tree = _previous_pts_tree
+
+            coarsener = Interpolator(fine_X, X_in_domain, fine_tree; 
+                linear = false, first_index = true)
+            prolongator = Interpolator(X_in_domain, fine_X, tree;
+                linear = false, first_index = true, n_neighbors = 1)
+
+            return (coarsener, dom, prolongator)
+        end
+
+        # else return domain only
+        dom
     end
 
     include("arraybends.jl")

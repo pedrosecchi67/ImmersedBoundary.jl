@@ -31,11 +31,14 @@ module NNInterpolator
     If `first_index` is true, the first dimension is interpreted as the point index upon interpolation.
     Otherwise, the last dimension is interpreted as the point index (default).
     Note that, if `first_index` is true, then `Xc, X` will also be expected to have shape `(npts, ndims)`.
+
+    If `n_neighbors` is not given, it is set to `2 ^ ndims`.
     """
     function Interpolator(Xc::AbstractMatrix, X::AbstractMatrix, 
         tree::Union{KDTree, Nothing} = nothing;
         linear::Bool = true,
-        first_index::Bool = false)
+        first_index::Bool = false,
+        n_neighbors::Int = 0)
 
         if first_index
             Xc = permutedims(Xc)
@@ -44,7 +47,11 @@ module NNInterpolator
 
         n_outputs = size(X, 2)
         nd = size(X, 1)
-        kneighs = 2 ^ nd
+        kneighs = (
+            n_neighbors == 0 ?
+            2 ^ nd :
+            n_neighbors
+        )
 
         if n_outputs == 0
             return Interpolator(

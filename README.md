@@ -312,7 +312,8 @@ CX, CY = ibm.surface_integral(
 
 ### Multigrid
 
-You can use `ibm.block_average` to obtain the average of a block-structured array at each mesh block in the current partition:
+You can use `ibm.block_average` to obtain the average of a block-structured array at each mesh block in the current partition, and thus obtain one level of agglomeration-based,
+geometric multigrid:
 
 ```julia
 dom(r, u) do part, rdom, udom
@@ -331,6 +332,28 @@ dom(r, u) do part, rdom, udom
 
     ibm.update_partition!(part, rdom, R)
 end
+```
+
+Another more elaborate, but more memory-consuming alternative is the 
+kwarg `multigrid_levels` in the `Domain` constructor:
+
+```julia
+function solve_multigrid(dom, Q, R)
+    if isnothing(dom.multigrid) # stopping condition: coarsest level
+        return solve(dom, Q, R) # solve for residual on current level
+    end
+
+    # solve on coarse level and prolongate
+    coarsener, dom_coarse, prolongator = dom.multigrid
+    dQ = solve(dom_coarse, coarsener(Q), coarsener(R)) |> prolongator
+
+    dQ .+= solve(Q, R) # solve for residual on current level
+
+    dQ
+end
+
+dom = ibm.Domain(origin, widths, surfaces...;
+        multigrid_levels = 3)
 ```
 
 ### CFD utilities
