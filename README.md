@@ -221,6 +221,15 @@ end
 # ux is now the first, x-axis derivative of u
 ```
 
+Other functions include:
+
+```julia
+ibm.∇ # backward derivative
+ibm.Δ # forward derivative
+ibm.δ # central derivative
+ibm.μ # face averages
+```
+
 ### Boundary conditions
 
 BC imposition is performed via ghost cells (check the documentation for further info), each having an image point on the opposite side of the boundary. An example of BC imposition is the following implementation of the non-penetration condition:
