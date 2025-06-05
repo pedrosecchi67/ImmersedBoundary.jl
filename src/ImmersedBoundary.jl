@@ -742,7 +742,7 @@ module ImmersedBoundary
         # finally,  let's create surface structs 
         surface_dict = Dict{String, Surface}()
         # only for fine level!! No pproc on coarse levels!
-        if _mgrid_depth > 0
+        if _mgrid_depth == 0
             for (sname, stl, L) in surfaces
                 surface_dict[sname] = Surface(
                     X_in_domain, tree, stl;
