@@ -75,6 +75,7 @@ function Domain(
         approximation_ratio::Float64 = 2.0,
         verbose::Bool = false,
         max_partition_blocks::Int64 = 1000,
+        multigrid_levels::Int64 = 0,
         families = nothing,
 )
 ```
@@ -103,7 +104,8 @@ function Domain(
 * A point reference within the domain. If absent, external flow is assumed;
 * An approximation ratio between wall distance and cell circumradius past which
     distance functions are approximated; 
-* A maximum number of octree blocks per partition; and
+* A maximum number of octree blocks per partition; 
+* A number of multigrid levels; and
 * A set of families defining surface groups for postprocessing, BC imposition and wall
     distance calculations.
 
