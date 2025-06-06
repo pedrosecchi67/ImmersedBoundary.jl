@@ -10,6 +10,7 @@ module ImmersedBoundary
 
     using .Mesher.DocStringExtensions
     using .Mesher.LinearAlgebra
+    using .Mesher: @threads
 
     include("nninterp.jl")
     using .NNInterpolator
@@ -407,7 +408,17 @@ module ImmersedBoundary
             families = nothing,
             _previous_pts_tree = nothing,
             _mgrid_depth::Int64 = 0,
+            _stltree_dict = nothing
     )
+        # let's create a dict of STL distance trees to pass to other
+        # multigrid levels
+        if isnothing(_stltree_dict)
+            if verbose
+                println("Creating STL tree dictionary at this level")
+            end
+            _stltree_dict = Dict{String, Any}()
+        end
+
         nd = length(origin)
         if block_sizes isa Number # if it's an int, use it for all dimensions
             block_sizes = tuple(
@@ -511,14 +522,25 @@ module ImmersedBoundary
 
             if all( # case with STL surface
                 f -> (f isa String), famdef
-            )
-                stl = mapreduce( # join all STLs together
-                    f -> stl_dict[f],
-                    cat, famdef
-                )
-                tree = STLTree(stl) # construct triangulation tree structure
+            ) 
+                stl = nothing
+                tree = nothing
+                # retrieve past stereolitography and tree if available
+                if haskey(_stltree_dict, fam)
+                    stl, tree = _stltree_dict[fam]
+                else
+                    stl = mapreduce( # join all STLs together
+                        f -> stl_dict[f],
+                        cat, famdef
+                    )
+                    tree = STLTree(stl) # construct triangulation tree structure
 
-                for (ib, block) in enumerate(blocks) # iterate for blocks
+                    _stltree_dict[fam] = (stl, tree)
+                end
+
+                @threads for ib = 1:length(blocks) # iterate between blocks
+                    block = blocks[ib]
+
                     # for the current octree cell, obtain the closest projection
                     c = msh.centers[:, ib]
                     p = zeros(nd)
@@ -592,7 +614,9 @@ module ImmersedBoundary
                         ref, true
                     )
 
-                    for (ib, block) in enumerate(blocks)
+                    @threads for ib = 1:length(blocks)
+                        block = blocks[ib]
+
                         for inds in cartesian_indices(block)
                             c = cell_center(block, inds...) |> collect
                             p = Projection(triref, c)
@@ -764,6 +788,7 @@ module ImmersedBoundary
                     multigrid_levels = multigrid_levels, families = families,
                     _previous_pts_tree = (X_in_domain, tree),
                     _mgrid_depth = _mgrid_depth + 1,
+                    _stltree_dict = _stltree_dict,
             )
         end
 
