@@ -813,7 +813,7 @@ module ImmersedBoundary
             coarsener = Interpolator(fine_X, X_in_domain, fine_tree; 
                 linear = false, first_index = true)
             prolongator = Interpolator(X_in_domain, fine_X, tree;
-                linear = false, first_index = true, n_neighbors = 1)
+                linear = false, first_index = true)
 
             return (coarsener, dom, prolongator)
         end
