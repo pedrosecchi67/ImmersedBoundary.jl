@@ -388,4 +388,5 @@ For easier implementation of CFD codes, you may use the module `ImmersedBoundary
 ?CFD.timescale
 ?CFD.wall_bc
 ?CFD.freestream_bc
+?CFD.ConvergenceCriteria
 ```
