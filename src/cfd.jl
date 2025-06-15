@@ -553,7 +553,7 @@ module CFD
     Struct to hold a set of convergence criteria
     """
     mutable struct ConvergenceCriteria
-        rmax::Float64
+        r0::Float64
         iterations::Int64
         rtol::Float64
         atol::Float64
@@ -564,7 +564,7 @@ module CFD
     $TYPEDSIGNATURES
     
     Constructor for convergence criteria. Convergence is reached if
-    `r < rmax * rtol + atol` or `n_iterations > max_iterations`.
+    `r < r0 * rtol + atol` or `n_iterations > max_iterations`.
     """
     ConvergenceCriteria(
         ;
@@ -582,15 +582,13 @@ module CFD
     Register new residual array/scalar to a convergence monitor.
     The iteration count is incremented.
 
-    Returns false if `r >= rmax * rtol + atol` and `n_iterations < max_iterations`.
+    Returns false if `r >= r0 * rtol + atol` and `n_iterations < max_iterations`.
     """
     function Base.push!(conv::ConvergenceCriteria, r)
         r = norm(r)
 
         if conv.iterations == 0
-            conv.rmax = r
-        else
-            conv.rmax = max(r, conv.rmax)
+            conv.r0 = r
         end
 
         conv.iterations += 1
@@ -598,7 +596,7 @@ module CFD
             return true
         end
 
-        if r < conv.rmax * conv.rtol + conv.atol
+        if r < conv.r0 * conv.rtol + conv.atol
             return true
         end
 
