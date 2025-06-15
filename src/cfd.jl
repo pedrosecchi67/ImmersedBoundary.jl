@@ -603,4 +603,56 @@ module CFD
         return false
     end
 
+    """
+    $TYPEDFIELDS
+
+    Struct to hold a CTU counter
+    """
+    mutable struct CTUCounter
+        adimensional_time::Float64
+        L::Float64
+        λ::Float64
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Constructor for a CPU counter.
+    Counts `V × t / L` if `count_speed_of_sound = false`
+    or `(V + a) × t / L` otherwise.
+
+    `freestream` may be a scalar or a `Freestream` struct.
+    If `freestream` is a scalar, it is considered to be the
+    characteristic velocity of the flow.
+    """
+    function CTUCounter(
+        L::Float64, freestream;
+        count_speed_of_sound::Bool = false
+    )
+        λ = freestream
+        if freestream isa Freestream
+            λ = norm(freestream.v)
+
+            if count_speed_of_sound
+                λ += speed_of_sound(
+                    freestream.fluid, freestream.T
+                )
+            end
+        end
+
+        CTUCounter(0.0, L, λ)
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Add time step to CTU counter and return the resulting
+    CTU count
+    """
+    Base.push!(cnt::CTUCounter, dt) = let dtmin = minimum(dt)
+        cnt.adimensional_time += dtmin * cnt.λ / cnt.L
+
+        cnt.adimensional_time
+    end
+
 end # module CFD
