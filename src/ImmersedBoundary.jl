@@ -669,7 +669,7 @@ module ImmersedBoundary
         pranges = partition_ranges(
             length(blocks), max_partition_blocks
         )
-        for prange in pranges
+        @threads for prange in pranges
             # slices for the current partition:
             indom = selectdim(in_domain, 1, prange)
             idx_indom = selectdim(index_in_domain, 1, prange)
