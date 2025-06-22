@@ -167,8 +167,6 @@ module STLHandler
 
     Obtain stereolitography data from mesh file.
 
-    Uses MeshIO.jl as a backend.
-
     Disconsiders any mesh elements that aren't triangles.
 
     If a .dat file is provided, it will be interpreted as a Selig-format dat file
@@ -311,9 +309,6 @@ module STLHandler
 
     Split stereolitography object at plane traced through the median
     of simplex centers.
-
-    Also returns index of best split dimension, and the location of the
-    split plane in said dimension.
     """
     function split_at_plane(stl::Stereolitography)
 
@@ -565,12 +560,15 @@ module STLHandler
     end
 
     """
-    Find if a line connecting two points crosses a simplex
+    Find if a line connecting two points crosses a simplex.
+    If `register` is provided, variable `ξ` such that the intersection
+    is `p1 + (p2 - p1) * ξ` is pushed to it in case there is an intersection.
     """
     function crosses_simplex(
         simplex::AbstractMatrix{Float64},
         p1::AbstractVector{Float64},
         p2::AbstractVector{Float64},
+        register::Union{Nothing, AbstractVector{Float64}} = nothing
     )
 
         p0 = simplex[:, 1]
@@ -599,17 +597,21 @@ module STLHandler
             return false
         end
 
-        ξ1 = ξ1[1:(end - 1)]
+        ξp = ξ1[1:(end - 1)]
 
         if any(
             x -> x < - nϵ,
-            ξ1
+            ξp
         )
             return false
         end
 
-        if sum(ξ1) > 1.0 + nϵ
+        if sum(ξp) > 1.0 + nϵ
             return false
+        end
+
+        if !isnothing(register)
+            push!(register, - ξ1[end])
         end
 
         true
@@ -634,8 +636,9 @@ module STLHandler
         stl::Stereolitography, 
         p1::AbstractVector{Float64},
         p2::AbstractVector{Float64},
+        register::Union{Nothing, AbstractVector{Float64}} = nothing
     ) = map(
-        simp -> crosses_simplex(view(stl.points, :, simp), p1, p2),
+        simp -> crosses_simplex(view(stl.points, :, simp), p1, p2, register),
         eachcol(stl.simplices)
     ) |> sum
 
@@ -694,20 +697,21 @@ module STLHandler
         node::STLTree,
         p1::AbstractVector{Float64},
         p2::AbstractVector{Float64},
+        register::Union{Nothing, AbstractVector{Float64}} = nothing
     )
 
         if isleaf(node)
-            return n_crossings(node.stl, p1, p2)
+            return n_crossings(node.stl, p1, p2, register)
         end
 
         n = 0
 
         if intersects(node.left_child.box, p1, p2)
-            n += n_crossings(node.left_child, p1, p2)
+            n += n_crossings(node.left_child, p1, p2, register)
         end
 
         if intersects(node.right_child.box, p1, p2)
-            n += n_crossings(node.right_child, p1, p2)
+            n += n_crossings(node.right_child, p1, p2, register)
         end
 
         n
@@ -734,6 +738,21 @@ module STLHandler
 
         n_crossings(node, outside_reference, x) % 2 == 1
 
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Returns vector of values of variable `ξ` such that the intersections with
+    the surface can be described by `p1 + (p2 - p1) * ξ`.
+    """
+    crossings(node::STLTree, 
+              p1::AbstractVector{Float64}, p2::AbstractVector{Float64}) = let ξ = Float64[]
+        let n = n_crossings(node, p1, p2, ξ)
+            @assert length(ξ) == n "Inconsistent number of return values in intersection detection"
+
+            ξ
+        end
     end
 
     """
