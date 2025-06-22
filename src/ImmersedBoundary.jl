@@ -661,6 +661,10 @@ module ImmersedBoundary
             view(Xtot, vec(in_domain), :)
         end
 
+        if verbose
+                println("Creating NN tree...")
+        end
+
         # KD tree for interpolator construction
         tree = KDTree(X_in_domain')
 
@@ -669,6 +673,10 @@ module ImmersedBoundary
         pranges = partition_ranges(
             length(blocks), max_partition_blocks
         )
+
+        if verbose
+                println("Defining partition data...")
+        end
         @threads for prange in pranges
             # slices for the current partition:
             indom = selectdim(in_domain, 1, prange)
