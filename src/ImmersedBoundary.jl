@@ -399,7 +399,7 @@ module ImmersedBoundary
             block_sizes::Union{Tuple, Int} = 8,
             refinement_regions::AbstractVector = [],
             max_length::Float64 = Inf,
-            ghost_layer_ratio::Tuple = (-1.1, 2.1),
+            ghost_layer_ratio::Tuple = (0.0, 2.1),
             interior_point = nothing,
             approximation_ratio::Float64 = 2.0,
             verbose::Bool = false,
