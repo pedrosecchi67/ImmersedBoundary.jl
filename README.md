@@ -390,4 +390,5 @@ For easier implementation of CFD codes, you may use the module `ImmersedBoundary
 ?CFD.freestream_bc
 ?CFD.ConvergenceCriteria
 ?CFD.CTUCounter
+?CFD.clip_CFL!
 ```
