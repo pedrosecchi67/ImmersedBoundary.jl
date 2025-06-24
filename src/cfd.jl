@@ -655,4 +655,86 @@ module CFD
         cnt.adimensional_time
     end
 
+    """
+    $TYPEDSIGNATURES
+
+    Reduce value of `dt` for each cell until no `NaN` or `Inf` is found.
+
+    Done in-place. Returns final residual, the number of cells with timestep reductions and
+    the maximum time-step reduction factor.
+
+    Function `f(dt, Q, args...; kwargs...)` should return `dQ!dt`, 
+    where `Q` is a state variable matrix with shape `(nvars, ncells)` or
+    `(ncells, nvars)`.
+
+    If `check_residuals = true`, both `Qnew` and `f(dt, Qnew)`, for 
+    `Qnew = Q .+ f(dt, Q) .* dt`, are checked for violations.
+    """
+    function clip_CFL!(
+        f,
+        dt::AbstractVector{Float64}, Q::AbstractMatrix{Float64}, 
+        args::AbstractMatrix{Float64}...;
+        reduction_ratio::Real = 0.5,
+        check_residuals::Bool = false,
+        max_iterations::Int = 10,
+        lower_boundary::Union{AbstractVector{Float64}, Float64} = -Inf64,
+        upper_boundary::Union{AbstractVector{Float64}, Float64} = Inf64,
+        kwargs...
+    )
+        min_ratio = 1.0
+
+        r = q -> f(dt, q, args...; kwargs...)
+
+        # check if input is in column-major order
+        col_major = false
+        if size(Q, 1) < length(dt)
+            dt = dt'
+            col_major = true
+        else
+            lower_boundary = lower_boundary'
+            upper_boundary = upper_boundary'
+        end
+
+        is_valid = u -> let iv = any(
+            uu -> !(isnan(uu) || isinf(uu)), u;
+            dims = (col_major ? 1 : 2)
+        )
+            if !(isinf(lower_boundary) && isinf(upper_boundary))
+                iv .= iv .&& any(
+                    (@. u >= lower_boundary && u <= upper_boundary);
+                    dims = (col_major ? 1 : 2)
+                )
+            end
+
+            iv
+        end
+
+        reduced = falses(length(dt))
+
+        Qnew = copy(Q)
+        for _ = 1:max_iterations
+            Qnew .= Q .+ r(Q) .* dt
+            iv = is_valid(Qnew)
+
+            if all(iv)
+                break
+            end
+
+            if check_residuals
+                iv .= iv .&& is_valid(r(Qnew))
+            end
+
+            # reduce timestep for invalid cells
+            @. dt = dt * max(iv, reduction_ratio)
+            @. reduced = reduced || (!iv)
+            min_ratio *= reduction_ratio
+        end
+
+        # to save memory:
+        residual = Qnew
+        residual .= (Qnew .- Q) ./ dt
+
+        (residual, sum(reduced), min_ratio)
+    end
+
 end # module CFD
