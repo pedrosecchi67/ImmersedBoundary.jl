@@ -112,7 +112,7 @@ module ImmersedBoundary
         image_points = @. projs + normals * image_distances
 
         # construct image interpolator
-        intp = Interpolator(X, image_points, tree; linear = true, first_index = true)
+        intp = Interpolator(X, image_points, tree; linear = false, first_index = true)
 
         Boundary(
             intp, ghosts, normals, 
