@@ -1,11 +1,18 @@
-import ImmersedBoundary as ibm
-using LinearAlgebra
-
 @info "Running NACA-0012 mesh and operator test..."
 
+using CUDA
+
 import ImmersedBoundary as ibm
 
-using CUDA
+function coarsen_prolongate(dom::ibm.Domain, Q::AbstractArray)
+    if isnothing(dom.multigrid)
+        return Q
+    end
+
+    coars, domc, prolong = dom.multigrid
+
+    coars(Q) |> q -> coarsen_prolongate(domc, q) |> prolong
+end
 
 stl = ibm.Stereolitography("n0012.dat")
 
@@ -17,7 +24,9 @@ dom = ibm.Domain(
     refinement_regions = [
         ibm.Ball([0.0, 0.0], 0.0) => 0.00025,
         ibm.Ball([1.0, 0.0], 0.0) => 0.00025,
-    ]
+    ],
+    multigrid_levels = 3,
+    verbose = true
 )
 
 @info "$(length(dom)) non-blanked, non-margin cells"
@@ -34,11 +43,7 @@ dom(uv, uvcoarse, k;
     conv_to_backend = CuArray,
     conv_from_backend = Array) do part, uvdom, uvcoarse_dom, kdom
 
-    UV = part(uvdom)
-    UVc = part(uvcoarse_dom)
-    K = part(kdom)
-
-    ibm.impose_bc!(part, "wall", UV, K) do bdry, uvi, ki
+    ibm.impose_bc!(part, "wall", uvdom, kdom) do bdry, uvi, ki
         u, v = eachcol(uvi)
         nx, ny = eachcol(bdry.normals)
 
@@ -52,20 +57,22 @@ dom(uv, uvcoarse, k;
         )
     end
 
-    ibm.impose_bc!(part, "FARFIELD", K) do bdry, ki
+    ibm.impose_bc!(part, "FARFIELD", kdom) do bdry, ki
         kb = similar(ki)
         kb .= 0.0
 
         kb
     end
 
+    UV = part(uvdom)
+    UVc = copy(UV)
     UVc .= ibm.block_average(part, UV)
 
-    ibm.update_partition!(part, uvdom, UV)
     ibm.update_partition!(part, uvcoarse_dom, UVc)
-    ibm.update_partition!(part, kdom, K)
 
 end
+
+kmgrid = coarsen_prolongate(dom, k)
 
 fluid = ibm.CFD.Fluid()
 free_old = ibm.CFD.Freestream(fluid, 0.5, 0.0)
@@ -81,7 +88,8 @@ dt = ibm.timescale(dom, fluid, Q) |> minimum
 let Qnew = copy(Q)
     dom(Q, Qnew;
         conv_to_backend = CuArray,
-        conv_from_backend = Array) do part, Qdom, Qnewdom
+        conv_from_backend = Array
+    ) do part, Qdom, Qnewdom
         Qblock = part(Qdom)
         Qnewblock = part(Qnewdom)
 
@@ -91,19 +99,23 @@ let Qnew = copy(Q)
             Qnewblock .-= dt .* ibm.∇(part, ibm.CFD.HLL(Ql, Qr, i, fluid), i)
         end
 
+        ibm.update_partition!(part, Qnewdom, Qnewblock)
+
         ibm.impose_bc!(
             ibm.wall_bc,
             part, "wall",
-            Qnewblock; fluid = fluid
+            Qnewdom; fluid = fluid,
+            du!dn = (b, v, q) -> let dv = similar(v)
+                dv .= 100.0
+                dv
+            end
         )
         ibm.impose_bc!(
             ibm.freestream_bc,
             part, "FARFIELD",
-            Qnewblock;
+            Qnewdom;
             freestream = free
         )
-
-        ibm.update_partition!(part, Qnewdom, Qnewblock)
     end
 
     Q .= Qnew
@@ -112,5 +124,5 @@ end
 ρ, E, ρu, ρv = eachcol(Q)
 
 ibm.export_vtk("n0012_results", dom;
-    uv = uv, uvcoarse = uvcoarse, k = k,
+    uv = uv, uvcoarse = uvcoarse, k = k, kmgrid = kmgrid,
     rho = ρ, E = E, rhou = ρu, rhov = ρv)

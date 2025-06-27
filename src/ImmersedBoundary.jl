@@ -23,12 +23,12 @@ module ImmersedBoundary
 
     Struct to define a Cartesian grid block
     """
-    struct Block
-        margin::Int32
-        size::Tuple
-        origin::Tuple
-        widths::Tuple
-        spacing::Tuple
+    struct Block{N} # using template to ensure bitstypes that we can transport to GPU
+        margin::Int64
+        size::NTuple{N, Int64}
+        origin::NTuple{N, Float64}
+        widths::NTuple{N, Float64}
+        spacing::NTuple{N, Float64}
     end
 
     """
@@ -268,16 +268,16 @@ module ImmersedBoundary
 
     Type to represent a mesh parition.
     """
-    struct Partition
-        size::Tuple
-        block_size::Tuple
+    struct Partition{N, M}
+        size::NTuple{N, Int64}
+        block_size::NTuple{M, Int64}
         spacing::AbstractMatrix{Float64}
         interpolator::Interpolator
         domain::AbstractVector{Int32}
         image::AbstractVector{Int32}
         in_domain::AbstractVector{Int32}
         is_in_domain::AbstractArray{Bool}
-        blocks::AbstractVector{Block}
+        blocks::AbstractVector{Block{M}}
         boundaries::Dict{String, Boundary}
     end
 
@@ -435,12 +435,12 @@ module ImmersedBoundary
             [
                 (bname, stl, s * maxwidth) for (bname, stl, s) in surfaces
             ]...;
-            growth_ratio = 2.0 / (3 * sqrt(nd)) + 0.99,
+            growth_ratio = 2.0 / (3 * sqrt(nd)) + 0.99, # heuristic to ensure balanced octree
             refinement_regions = [
                 sdf => s * maxwidth for (sdf, s) in refinement_regions
             ],
             max_length = max_length * maxwidth,
-            ghost_layer_ratio = -1.0 + ghost_layer_ratio[1] / maxwidth,
+            ghost_layer_ratio = -1.0 + ghost_layer_ratio[1] / maxwidth, # At least one margin cell in domain? valid block
             interior_point = interior_point,
             approximation_ratio = approximation_ratio,
             verbose = verbose,
@@ -488,7 +488,7 @@ module ImmersedBoundary
         # array size for a few vars. we're storing in a minute
         array_size = (length(blocks), (block_sizes .+ 2margin)...)
 
-        # where are the cells? are they actual cells, or blanked regions?
+        # where are the cells? are they actual cells in the domain, or blanked regions?
         in_domain = trues(array_size...)
         cell_centers = Array{Float64}(undef, array_size..., nd)
         for (ib, block) in enumerate(blocks)
@@ -581,7 +581,7 @@ module ImmersedBoundary
                         )
                     end
 
-                    for inds in cartesian_indices(block)
+                    for inds in cartesian_indices(block) # calculate projs. and SDFs
                         c = cell_center(block, inds...) |> collect
                         p = Projection(triref, c)
 
@@ -617,7 +617,7 @@ module ImmersedBoundary
                     @threads for ib = 1:length(blocks)
                         block = blocks[ib]
 
-                        for inds in cartesian_indices(block)
+                        for inds in cartesian_indices(block) # same distance calculation
                             c = cell_center(block, inds...) |> collect
                             p = Projection(triref, c)
                             d = norm(p.projection .- c)
@@ -661,12 +661,36 @@ module ImmersedBoundary
             view(Xtot, vec(in_domain), :)
         end
 
+        # let's also store the circumradius of each cell...
+        # keep it in vector form and select only non-blanked cells
+        radii = let r = Array{Float64}(undef, size(in_domain)...)
+            for (ib, block) in enumerate(blocks) # define for each block...
+                selectdim(r, 1, ib) .= norm(block.spacing) / 2
+            end
+
+            vec(r)[vec(in_domain)] # ...then filter and flatten
+        end
+
         if verbose
                 println("Creating NN tree...")
         end
 
         # KD tree for interpolator construction
         tree = KDTree(X_in_domain')
+
+        let indom = vec(in_domain) |> findall # store indices of non-blanked cells, only
+            # convert boundary SDFs and projs to vector notation instead of block-structured array
+            for (bname, sdf) in boundary_sdfs
+                boundary_sdfs[bname] = reshape(
+                    sdf, :
+                )[indom]
+            end
+            for (bname, projs) in boundary_projs
+                boundary_projs[bname] = reshape(
+                    projs, :, nd
+                )[indom, :]
+            end
+        end
 
         # now, let's start partitioning the domain
         partitions = Partition[]
@@ -685,11 +709,11 @@ module ImmersedBoundary
 
             part_size = size(indom)
 
-            # convert to array notation
+            # convert to vector notation
             X = reshape(ccenters, :, nd)
             indom = vec(indom)
             idx_indom = vec(idx_indom)
-            local_idx_indom = findall(indom) # indices of non-blanked cells among all in the 
+            local_idx_indom = Int32.(findall(indom)) # indices of non-blanked cells among all in the 
             # current partition
 
             # obtain interpolator to current partition cells (including blanks)
@@ -709,33 +733,20 @@ module ImmersedBoundary
             intp = NNInterpolator.filtered(intp, hmap)
             idx_indom = map(i -> hmap[i], idx_indom)
 
-            # calculate circumradius for each cell. Used for boundary definition
-            circumradius = let cr = Array{Float64}(undef, part_size...)
-                for (i, ib) in enumerate(prange)
-                    selectdim(cr, 1, i) .= norm(blocks[ib].spacing) / 2
-                end
-                cr
-            end
-            # filter to non-blanked cells and obtain KD Tree
-            circumradius = vec(circumradius)[local_idx_indom]
-            X = X[local_idx_indom, :]
+            # filter to domain cells and obtain KD Tree
+            circumradius = radii[dom]
+            X = X_in_domain[dom, :]
 
             part_tree = KDTree(X')
 
             # define boundaries
             boundaries = Dict{String, Boundary}()
             for bname in keys(boundary_projs)
-                projs = selectdim(
-                    boundary_projs[bname], 1, prange
-                )
-                sdfs = selectdim(
-                    boundary_sdfs[bname], 1, prange
-                )
+                # select domain cells
+                projs = selectdim(boundary_projs[bname], 1, dom)
+                sdfs = selectdim(boundary_sdfs[bname], 1, dom)
 
-                projs = reshape(projs, :, nd) |> x -> selectdim(x, 1, local_idx_indom)
-                sdfs = vec(sdfs) |> x -> view(x, local_idx_indom)
-
-                bdry = Boundary(
+                bdry = Boundary( # build boundary
                     circumradius,
                     X,
                     projs, sdfs,
@@ -750,7 +761,7 @@ module ImmersedBoundary
                 partitions, Partition(
                     part_size,
                     blocks[1].size,
-                    (msh.widths[:, prange] ./ block_sizes) |> permutedims,
+                    (msh.widths[:, prange] ./ block_sizes) |> permutedims, # spacing
                     intp,
                     dom,
                     idx_indom,
@@ -760,15 +771,6 @@ module ImmersedBoundary
                     boundaries
                 )
             )
-        end
-
-        in_domain = vec(in_domain) |> findall # store indices of non-blanked cells, only
-
-        # convert boundary SDFs to array notation
-        for (bname, sdf) in boundary_sdfs
-            boundary_sdfs[bname] = reshape(
-                sdf, :
-            )[in_domain]
         end
 
         # finally,  let's create surface structs 
@@ -968,16 +970,13 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Impose boundary condition on block-structured array.
+    Impose boundary condition on domain array.
 
     Example for non-penetration condition:
 
     ```
     dom(u, v) do part, udom, vdom
-        U = part(udom)
-        V = part(vdom)
-
-        ibm.impose_bc!(part, "wall", U, V) do bdry, uimage, vimage
+        ibm.impose_bc!(part, "wall", udom, vdom) do bdry, uimage, vimage
             nx, ny = bdry.normals |> eachcol
             un = @. nx * uimage + ny * vimage
 
@@ -986,9 +985,6 @@ module ImmersedBoundary
                 vimage .- vn .* ny
             )
         end
-
-        ibm.update_partition!(part, udom, U)
-        ibm.update_partition!(part, vdom, V)
     end
 
 
@@ -996,17 +992,13 @@ module ImmersedBoundary
     uv = zeros(length(dom), 2)
     uv[:, 1] .= 1.0
     dom(uv) do part, uvdom
-        UV = part(uvdom)
-        
-        ibm.impose_bc!(part, "wall", UV) do bdry, uvim
+        ibm.impose_bc!(part, "wall", uvdom) do bdry, uvim
             uimage, vimage = eachcol(uvim)
             nx, ny = eachcol(bdry.normals)
             un = @. nx * uimage + ny * vimage
 
             uvim .- un .* bdry.normals
         end
-
-        ibm.update_partition!(part, uvdom, UV)
     end
     ```
 
@@ -1021,22 +1013,13 @@ module ImmersedBoundary
         args::AbstractArray{Float64}...;
         kwargs...
     )
-        nd = length(part.size)
-
-        pargs = map(
-            a -> selectdim(
-                let extra_dims = size(a)[(nd + 1):end]
-                    reshape(a, :, extra_dims...)
-                end, 1, part.in_domain
-            ), args
-        )
         bdry = part.boundaries[bname]
 
         if length(bdry.ghost_indices) == 0
             return
         end
 
-        bargs = f(bdry, bdry.image_interpolator.(pargs)...; kwargs...)
+        bargs = f(bdry, bdry.image_interpolator.(args)...; kwargs...)
 
         if !(bargs isa Tuple)
             if bargs isa AbstractVector && eltype(bargs) <: AbstractArray
@@ -1046,7 +1029,7 @@ module ImmersedBoundary
             end
         end
 
-        for (b, a) in zip(bargs, pargs)
+        for (b, a) in zip(bargs, args)
             gd = bdry.ghost_distances
             id = bdry.image_distances
             η = @. gd / id

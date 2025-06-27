@@ -236,10 +236,7 @@ BC imposition is performed via ghost cells (check the documentation for further 
 
 ```julia
 dom(u, v) do part, udom, vdom
-    U = part(udom)
-    V = part(vdom)
-
-    ibm.impose_bc!(part, "wall", U, V) do bdry, uimage, vimage
+    ibm.impose_bc!(part, "wall", udom, vdom) do bdry, uimage, vimage
         nx, ny = bdry.normals |> eachcol
         un = @. nx * uimage + ny * vimage
 
@@ -248,9 +245,6 @@ dom(u, v) do part, udom, vdom
             vimage .- vn .* ny
         )
     end
-
-    ibm.update_partition!(part, udom, U)
-    ibm.update_partition!(part, vdom, V)
 end
 
 
@@ -258,17 +252,13 @@ end
 uv = zeros(length(dom), 2)
 uv[:, 1] .= 1.0
 dom(uv) do part, uvdom
-    UV = part(uvdom)
-    
-    ibm.impose_bc!(part, "wall", UV) do bdry, uvim
+    ibm.impose_bc!(part, "wall", uvdom) do bdry, uvim
         uimage, vimage = eachcol(uvim)
         nx, ny = eachcol(bdry.normals)
         un = @. nx * uimage + ny * vimage
 
         uvim .- un .* bdry.normals
     end
-
-    ibm.update_partition!(part, uvdom, UV)
 end
 ```
 
@@ -285,17 +275,12 @@ Note that other field variable arrays may be passed to `impose_bc!`, and only th
 
 ```julia
 dom(u, v) do part, udom, vdom
-    U = part(udom)
-    V = part(vdom)
-
-    ibm.impose_bc!(part, "boundary", U, V) do bdry, ui, vi
+    ibm.impose_bc!(part, "boundary", udom, vdom) do bdry, ui, vi
         # Neumann, du!dn = 2v
         ubdry = ui .- vi .* 2.0 .* bdry.image_distances
 
         ubdry
     end
-
-    ibm.update_partition!(part, uvom, U)
 end
 ```
 
