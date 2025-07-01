@@ -1,18 +1,8 @@
-@info "Running NACA-0012 mesh and operator test..."
-
 using CUDA
 
+@info "Running NACA-0012 mesh and operator test..."
+
 import ImmersedBoundary as ibm
-
-function coarsen_prolongate(dom::ibm.Domain, Q::AbstractArray)
-    if isnothing(dom.multigrid)
-        return Q
-    end
-
-    coars, domc, prolong = dom.multigrid
-
-    coars(Q) |> q -> coarsen_prolongate(domc, q) |> prolong
-end
 
 stl = ibm.Stereolitography("n0012.dat")
 
@@ -20,59 +10,19 @@ L = 20.0
 
 dom = ibm.Domain(
     [-L/2, -L/2], [L, L],
-    ("wall", stl, 0.001);
+    ("wall", stl, 0.01);
     refinement_regions = [
-        ibm.Ball([0.0, 0.0], 0.0) => 0.00025,
-        ibm.Ball([1.0, 0.0], 0.0) => 0.00025,
+        ibm.Ball([0.0, 0.0], 0.0) => 0.0025,
+        ibm.Ball([1.0, 0.0], 0.0) => 0.0025,
     ],
-    multigrid_levels = 3,
+    max_partition_cells = 5000,
     verbose = true
 )
 
 @info "$(length(dom)) non-blanked, non-margin cells"
 
-dom = ibm.save_domain("dom.ibm", dom)
+ibm.save_domain("dom.ibm", dom)
 dom = ibm.load_domain("dom.ibm")
-
-uv = zeros(length(dom), 2)
-uv[:, 1] .= 1.0
-uvcoarse = copy(uv)
-k = zeros(length(dom))
-
-dom(uv, uvcoarse, k;
-    conv_to_backend = CuArray,
-    conv_from_backend = Array) do part, uvdom, uvcoarse_dom, kdom
-
-    ibm.impose_bc!(part, "wall", uvdom, kdom) do bdry, uvi, ki
-        u, v = eachcol(uvi)
-        nx, ny = eachcol(bdry.normals)
-
-        uvn = @. u * nx + v * ny
-
-        kb = similar(ki)
-        kb .= 1.0
-
-        (
-            uvi .- uvn .* bdry.normals, kb
-        )
-    end
-
-    ibm.impose_bc!(part, "FARFIELD", kdom) do bdry, ki
-        kb = similar(ki)
-        kb .= 0.0
-
-        kb
-    end
-
-    UV = part(uvdom)
-    UVc = copy(UV)
-    UVc .= ibm.block_average(part, UV)
-
-    ibm.update_partition!(part, uvcoarse_dom, UVc)
-
-end
-
-kmgrid = coarsen_prolongate(dom, k)
 
 fluid = ibm.CFD.Fluid()
 free_old = ibm.CFD.Freestream(fluid, 0.5, 0.0)
@@ -83,46 +33,44 @@ ibm.CFD.rotate_and_rescale!(free_old, free, ρ, E, ρu, ρv)
 
 Q = [ρ E ρu ρv]
 
-dt = ibm.timescale(dom, fluid, Q) |> minimum
+for _ = 1:10
+    dt = ibm.timescale(dom, fluid, Q) |> minimum
+    dt *= 0.5
 
-let Qnew = copy(Q)
-    dom(Q, Qnew;
-        conv_to_backend = CuArray,
-        conv_from_backend = Array
-    ) do part, Qdom, Qnewdom
-        Qblock = part(Qdom)
-        Qnewblock = part(Qnewdom)
+    let Qnew = copy(Q)
+        dom(
+            Q, Qnew;
+            conv_to_backend = CuArray,
+            conv_from_backend = Array,
+        ) do part, Q, Qnew
+            for i = 1:2
+                Ql, Qr = ibm.MUSCL(part, Q, i)
 
-        for i = 1:2
-            Ql, Qr = ibm.MUSCL(part, Qblock, i)
+                Qnew .-= dt .* ibm.∇(part, ibm.CFD.HLL(Ql, Qr, i, fluid), i)
+            end
 
-            Qnewblock .-= dt .* ibm.∇(part, ibm.CFD.HLL(Ql, Qr, i, fluid), i)
+            ibm.impose_bc!(
+                ibm.wall_bc,
+                part, "wall",
+                Qnew; fluid = fluid,
+                du!dn = (b, v, q) -> let dv = similar(v)
+                    dv .= 100.0
+                    dv
+                end
+            )
+            ibm.impose_bc!(
+                ibm.freestream_bc,
+                part, "FARFIELD",
+                Qnew;
+                freestream = free
+            )
         end
 
-        ibm.update_partition!(part, Qnewdom, Qnewblock)
-
-        ibm.impose_bc!(
-            ibm.wall_bc,
-            part, "wall",
-            Qnewdom; fluid = fluid,
-            du!dn = (b, v, q) -> let dv = similar(v)
-                dv .= 100.0
-                dv
-            end
-        )
-        ibm.impose_bc!(
-            ibm.freestream_bc,
-            part, "FARFIELD",
-            Qnewdom;
-            freestream = free
-        )
+        Q .= Qnew
     end
-
-    Q .= Qnew
 end
 
 ρ, E, ρu, ρv = eachcol(Q)
 
 ibm.export_vtk("n0012_results", dom;
-    uv = uv, uvcoarse = uvcoarse, k = k, kmgrid = kmgrid,
     rho = ρ, E = E, rhou = ρu, rhov = ρv)

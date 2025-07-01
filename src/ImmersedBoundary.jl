@@ -21,46 +21,6 @@ module ImmersedBoundary
     """
     $TYPEDFIELDS
 
-    Struct to define a Cartesian grid block
-    """
-    struct Block{N} # using template to ensure bitstypes that we can transport to GPU
-        margin::Int64
-        size::NTuple{N, Int64}
-        origin::NTuple{N, Float64}
-        widths::NTuple{N, Float64}
-        spacing::NTuple{N, Float64}
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Constructor for a block
-    """
-    Block(
-            origin::AbstractVector{Float64}, widths::AbstractVector{Float64},
-            size::Tuple{Vararg{Int}};
-            margin::Int = 1
-    ) = Block(
-              margin, size, tuple(origin...), tuple(widths...), tuple((widths ./ size)...)
-    )
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain all indices that define positions in the block
-    """
-    cartesian_indices(blck::Block) = Base.product([1:(s + 2 * blck.margin) for s in blck.size]...)
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain position of a cell center given its index
-    """
-    cell_center(blck::Block, i::Int...) = (@. blck.origin + blck.spacing * (i - 0.5 - blck.margin))
-
-    """
-    $TYPEDFIELDS
-
     Struct to define a boundary
     """
     struct Boundary
@@ -83,8 +43,13 @@ module ImmersedBoundary
         projs::AbstractMatrix{Float64},
         sdfs::AbstractVector{Float64},
         tree::KDTree,
-        ghost_ratios::Tuple{Float64, Float64}
+        ghost_ratios::Tuple{Float64, Float64};
+        Xc::Union{Nothing, AbstractMatrix{Float64}} = nothing,
     )
+        if isnothing(Xc)
+            Xc = X
+        end
+
         #check for ghost indices between circumradius thresholds
         g1, g2 = ghost_ratios
         ghost_indices = findall(
@@ -112,7 +77,7 @@ module ImmersedBoundary
         image_points = @. projs + normals * image_distances
 
         # construct image interpolator
-        intp = Interpolator(X, image_points, tree; linear = false, first_index = true)
+        intp = Interpolator(Xc, image_points, tree; first_index = true)
 
         Boundary(
             intp, ghosts, normals, 
@@ -268,17 +233,14 @@ module ImmersedBoundary
 
     Type to represent a mesh parition.
     """
-    struct Partition{N, M}
-        size::NTuple{N, Int64}
-        block_size::NTuple{M, Int64}
-        spacing::AbstractMatrix{Float64}
-        interpolator::Interpolator
+    struct Partition{N}
         domain::AbstractVector{Int32}
         image::AbstractVector{Int32}
-        in_domain::AbstractVector{Int32}
-        is_in_domain::AbstractArray{Bool}
-        blocks::AbstractVector{Block{M}}
+        image_in_domain::AbstractVector{Int32}
+        stencils::Dict{NTuple{N, Int32}, Interpolator}
         boundaries::Dict{String, Boundary}
+        spacing::AbstractMatrix{Float64}
+        centers::AbstractMatrix{Float64}
     end
 
     """
@@ -288,16 +250,10 @@ module ImmersedBoundary
     """
     struct Domain
         ndofs::Int64
-        size::Tuple
-        spacing::AbstractMatrix{Float64}
-        blocks::AbstractVector{Block}
-        boundary_distances::AbstractDict
-        surfaces::AbstractDict
+        mesh::Mesher.Mesh
         partitions::AbstractVector{Partition}
-        multigrid::Union{
-            Nothing,
-            Tuple{Interpolator, Domain, Interpolator}
-        }
+        surfaces::Dict{String, Surface}
+        boundary_distances::Dict{String, AbstractVector{Float64}}
     end
 
     """
@@ -336,16 +292,13 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
         
-    Generate a Building Cubes mesh defined by:
+    Generate an octree mesh defined by:
 
     * A hypercube origin;
     * A vector of hypercube widths;
     * A set of tuples in format `(name, surface, max_length)` describing
         stereolitography surfaces (`Mesher.Stereolitography`) and 
         the max. cell widths at these surfaces;
-    * A "margin" of cells for each block, used for inter-block communication;
-    * A block size, in the form of a tuple with number of cells along each axis, or
-        an integer with the same number for all axes;
     * A set of refinement regions described by distance functions and
         the local refinement at each region. Example:
             ```
@@ -357,13 +310,13 @@ module ImmersedBoundary
             ]
             ```
     * A maximum cell size (optional);
+    * A volumetric growth ratio;
     * An interval of ratios between the cell circumradius and the SDF of a given surface for 
         which cells are defined as ghosts;
     * A point reference within the domain. If absent, external flow is assumed;
     * An approximation ratio between wall distance and cell circumradius past which
         distance functions are approximated; 
-    * A maximum number of octree blocks per partition;
-    * A number of multigrid levels; and
+    * A maximum number of cells per partition;
     * A set of families defining surface groups for postprocessing, BC imposition and wall
         distance calculations.
 
@@ -391,62 +344,52 @@ module ImmersedBoundary
 
     The default family definition uses each surface as a family and defines
     the farfield as `"FARFIELD"`.
+    
+    Stencil points may be specified as tuples. An example for first order operations
+    on a 3D mesh is:
+
+    ```
+    stencil_points = [
+        (-1, 0, 0), (0, 0, 0), (1, 0, 0),
+        (0, -1, 0), (0, 0, 0), (0, 1, 0), # don't worry about duplicate values
+        (0, 0, -1), (0, 0, 0), (0, 0, 1)
+    ]
+    ```
+
+    The default is a cruciform, second-order CFD stencil.
     """
     function Domain(
             origin::Vector{Float64}, widths::Vector{Float64},
             surfaces::Tuple{String, Stereolitography, Float64}...;
-            margin::Int64 = 2,
-            block_sizes::Union{Tuple, Int} = 8,
             refinement_regions::AbstractVector = [],
             max_length::Float64 = Inf,
-            ghost_layer_ratio::Tuple = (0.0, 2.1),
+            growth_ratio::Float64 = 1.1,
+            ghost_layer_ratio::Tuple = (-1.1, 2.1),
             interior_point = nothing,
             approximation_ratio::Float64 = 2.0,
             verbose::Bool = false,
-            max_partition_blocks::Int64 = 1000,
-            multigrid_levels::Int64 = 0,
+            max_partition_cells::Int64 = 1000_000,
             families = nothing,
-            _previous_pts_tree = nothing,
-            _mgrid_depth::Int64 = 0,
-            _stltree_dict = nothing
+            stencil_points = Tuple[],
     )
-        # let's create a dict of STL distance trees to pass to other
-        # multigrid levels
-        if isnothing(_stltree_dict)
-            if verbose
-                println("Creating STL tree dictionary at this level")
-            end
-            _stltree_dict = Dict{String, Any}()
-        end
-
         nd = length(origin)
-        if block_sizes isa Number # if it's an int, use it for all dimensions
-            block_sizes = tuple(
-                fill(block_sizes, nd)...
-            )
-        end
-        maxwidth = max(block_sizes...)
 
-        if verbose
-            println("Generating octree at level $_mgrid_depth...")
-        end
-        msh = mshr.FixedMesh(
-            origin, widths,
-            [
-                (bname, stl, s * maxwidth) for (bname, stl, s) in surfaces
-            ]...;
-            growth_ratio = 2.0 / (3 * sqrt(nd)) + 0.99, # heuristic to ensure balanced octree
-            refinement_regions = [
-                sdf => s * maxwidth for (sdf, s) in refinement_regions
-            ],
-            max_length = max_length * maxwidth,
-            ghost_layer_ratio = -1.0 + ghost_layer_ratio[1] / maxwidth, # At least one margin cell in domain? valid block
-            interior_point = interior_point,
-            approximation_ratio = approximation_ratio,
-            verbose = verbose,
-            _mgrid_depth = _mgrid_depth,
-        )
+        # fill stencil points if unspecified
+        if length(stencil_points) == 0
+            stencil_points = copy(stencil_points) # let's not mess with the kwarg def. value
 
+            pt = zeros(Int32, nd)
+            for i = 1:nd
+                for k = -2:2
+                    pt[i] = k
+                    push!(stencil_points, tuple(pt...))
+                    pt[i] = 0
+                end
+            end
+        end
+        stencil_points = unique(stencil_points)
+
+        # define surfaces and families
         stl_dict = Dict( # store all STLs in a dictionary. We'll need them later for fam. construction
             [
                 bname => stl for (bname, stl, _) in surfaces
@@ -477,359 +420,238 @@ module ImmersedBoundary
             throw(error("Surface/family name \'surface\' is reserved"))
         end
 
-        blocks = [ # define block structs as helpers
-            Block(
-                o, w, block_sizes; margin = margin
-            ) for (o, w) in zip(
-                eachcol(msh.origins), eachcol(msh.widths)
-            )
-        ]
+        # generate octree
+        if verbose
+            println("Generating octree...")
+        end
 
-        # array size for a few vars. we're storing in a minute
-        array_size = (length(blocks), (block_sizes .+ 2margin)...)
-
-        # where are the cells? are they actual cells in the domain, or blanked regions?
-        in_domain = trues(array_size...)
-        cell_centers = Array{Float64}(undef, array_size..., nd)
-        for (ib, block) in enumerate(blocks)
-            for inds in cartesian_indices(block)
-                c = cell_center(block, inds...)
-
-                cell_centers[ib, inds..., :] .= c
-
-                if any(
-                    (@. inds <= margin || inds > block.size + margin)
-                )
-                    in_domain[ib, inds...] = false
-                end
+        # separate hypercube boundaries
+        hypercube_boundaries = Dict{String, AbstractVector}()
+        for (fam, famdef) in families
+            if eltype(famdef) <: Tuple
+                hypercube_boundaries[fam] = famdef
             end
         end
 
-        # now let's calculate SDFs and surface projections
-        boundary_projs = Dict{String, AbstractArray{Float64}}()
-        boundary_sdfs = Dict{String, AbstractArray{Float64}}()
+        msh = mshr.FixedMesh(
+            origin, widths,
+            surfaces...;
+            growth_ratio = growth_ratio,
+            refinement_regions = refinement_regions,
+            max_length = max_length,
+            ghost_layer_ratio = ghost_layer_ratio[1], # At least one margin cell in domain? valid block
+            interior_point = interior_point,
+            approximation_ratio = approximation_ratio,
+            farfield_boundaries = hypercube_boundaries,
+            verbose = verbose,
+        )
+
+        verbose && println("Obtaining KD tree...")
+        centers = msh.centers |> permutedims
+        spacing = msh.widths |> permutedims
+        ndofs = size(centers, 1)
+        tree = KDTree(centers')
+
+        # calculate boundary distances and projections
+        # considering families, not surfaces
+        boundary_distances = Dict{String, AbstractVector{Float64}}()
+        boundary_projs = Dict{String, AbstractMatrix{Float64}}()
 
         for (fam, famdef) in families
-            if verbose
-                println("Calculating SDFs to family $fam...")
-            end
+            if eltype(famdef) <: Tuple # hypercube boundary.
+                # just fetch the already calculated projections
+                projs = msh.boundary_projections[fam] |> permutedims
+                indom = msh.boundary_in_domain[fam]
 
-            bprojs = Array{Float64}(undef, array_size..., nd)
-            bsdfs = Array{Float64}(undef, array_size...)
+                sdfs = sqrt.(
+                    sum(
+                        (projs .- centers) .^ 2; dims = 2
+                    ) |> vec
+                ) .* (2 .* indom .- 1)
 
-            boundary_projs[fam] = bprojs
-            boundary_sdfs[fam] = bsdfs
+                boundary_projs[fam] = projs
+                boundary_distances[fam] = sdfs
+            else # STL boundary.
+                # figure out the smallest SDF among surfaces
+                minprojs = nothing
+                minsdfs = nothing
+                for sname in famdef
+                    projs = msh.boundary_projections[sname] |> permutedims
+                    indom = msh.boundary_in_domain[sname]
 
-            if all( # case with STL surface
-                f -> (f isa String), famdef
-            ) 
-                stl = nothing
-                tree = nothing
-                # retrieve past stereolitography and tree if available
-                if haskey(_stltree_dict, fam)
-                    stl, tree = _stltree_dict[fam]
-                else
-                    stl = mapreduce( # join all STLs together
-                        f -> stl_dict[f],
-                        cat, famdef
-                    )
-                    tree = STLTree(stl) # construct triangulation tree structure
+                    sdfs = sqrt.(
+                        sum(
+                            (projs .- centers) .^ 2; dims = 2
+                        ) |> vec
+                    ) .* (2 .* indom .- 1)
 
-                    _stltree_dict[fam] = (stl, tree)
-                end
-
-                @threads for ib = 1:length(blocks) # iterate between blocks
-                    block = blocks[ib]
-
-                    # for the current octree cell, obtain the closest projection
-                    c = msh.centers[:, ib]
-                    p = zeros(nd)
-                    sdf = Inf64
-                    for surf in famdef
-                        _p = msh.boundary_projections[surf][:, ib]
-                        _sdf = (
-                            msh.boundary_in_domain[surf][ib] * 2 - 1
-                        ) * norm(
-                            _p .- c
-                        )
-
-                        if _sdf < sdf
-                            sdf = _sdf
-                            p .= _p
-                        end
-                    end
-
-                    circumradius = norm(block.widths) / 2
-
-                    # if below threshold, calculate exact SDF. Else, use plane surface for
-                    # approximation
-                    triref = nothing
-                    if abs(sdf) > circumradius * approximation_ratio
-                        triref = TriReference(
-                            PlaneSDF(
-                                Projection(p, sdf >= 0.0),
-                                c
-                            ), 
-                            c,
-                            sdf >= 0.0
-                        )
+                    if isnothing(minsdfs)
+                        minsdfs = sdfs
+                        minprojs = projs
                     else
-                        triref = TriReference(
-                            tree,
-                            c,
-                            sdf >= 0.0
-                        )
-                    end
+                        smaller = (sdfs .< minsdfs) |> findall
 
-                    for inds in cartesian_indices(block) # calculate projs. and SDFs
-                        c = cell_center(block, inds...) |> collect
-                        p = Projection(triref, c)
-
-                        bprojs[ib, inds..., :] .= p.projection
-                        bsdfs[ib, inds...] = norm(
-                            p.projection .- c
-                        ) * (2 * p.interior - 1)
+                        minprojs[smaller, :] .= projs[smaller, :]
+                        minsdfs[smaller] .= sdfs[smaller]
                     end
                 end
-            elseif all(
-                f -> (f isa Tuple), famdef
-            )
-                bsdfs .= Inf64
 
-                # this is simpler. Just use distance to plane for all hypercube faces
-                for (dim, front) in famdef
-                    ref = @. origin + widths / 2
-                    proj = copy(ref)
-                    if front
-                        proj[dim] = origin[dim] + widths[dim]
-                    else
-                        proj[dim] = origin[dim]
-                    end
-
-                    triref = TriReference(
-                        PlaneSDF(
-                            Projection(proj, true), # we're always in the domain. It's an
-                            ref # enveloping hypercube!
-                        ), 
-                        ref, true
-                    )
-
-                    @threads for ib = 1:length(blocks)
-                        block = blocks[ib]
-
-                        for inds in cartesian_indices(block) # same distance calculation
-                            c = cell_center(block, inds...) |> collect
-                            p = Projection(triref, c)
-                            d = norm(p.projection .- c)
-
-                            if d < bsdfs[ib, inds...]
-                                bprojs[ib, inds..., :] .= p.projection
-                                bsdfs[ib, inds...] = d
-                            end
-                        end
-                    end
-                end
-            else
-                throw(error("Erroneous family definition. Check docs"))
-            end
-
-            # eliminate blanked cells (further in than the ghost layer)
-            # from the domain
-            for (ib, block) in enumerate(blocks)
-                circumradius = norm(block.spacing) / 2
-
-                idom = selectdim(in_domain, 1, ib)
-                sdfs = selectdim(bsdfs, 1, ib)
-                
-                let r = ghost_layer_ratio[1]
-                    @. idom = idom && (sdfs >= r * circumradius)
-                end
+                boundary_projs[fam] = minprojs
+                boundary_distances[fam] = minsdfs
             end
         end
 
-        # this is where it gets a little confusing, cause we have
-        # to store tons of indices. Buckle up
+        # figure out parts
+        pranges = partition_ranges(ndofs, max_partition_cells)
+        partitions = Partition{nd}[]
+        for (ip, prange) in enumerate(pranges)
+            verbose && println("Constructing partition $ip: range $prange")
 
-        # indices of non-blanked cells in domain. Let's keep it in block-structured shape
-        index_in_domain = reshape(
-            cumsum(vec(in_domain)), size(in_domain)...
-        )
-        n_in_domain = index_in_domain[end] # number of non-blanked cells
+            # start with image points
+            image = collect(prange) |> x -> Int32.(x)
+            icenters = centers[image, :]
+            ispacing = spacing[image, :]
 
-        # positions of cell centers for non-blanked cells
-        X_in_domain = let Xtot = reshape(cell_centers, :, nd)
-            view(Xtot, vec(in_domain), :)
-        end
+            # use interpolators in order to obtain domain
+            domain = Int32[]
+            for pt in stencil_points
+                X = icenters .+ ispacing .* collect(pt)'
 
-        # let's also store the circumradius of each cell...
-        # keep it in vector form and select only non-blanked cells
-        radii = let r = Array{Float64}(undef, size(in_domain)...)
-            for (ib, block) in enumerate(blocks) # define for each block...
-                selectdim(r, 1, ib) .= norm(block.spacing) / 2
+                intp = Interpolator(centers, X, tree; 
+                    first_index = true, linear = false)
+
+                domain = union(
+                    domain, NNInterpolator.domain(intp)
+                )
             end
 
-            vec(r)[vec(in_domain)] # ...then filter and flatten
-        end
+            # same for boundary interpolators
+            circumradius = sqrt.(
+                sum(
+                    ispacing .^ 2; dims = 2
+                ) |> vec
+            ) ./ 2
 
-        if verbose
-                println("Creating NN tree...")
-        end
-
-        # KD tree for interpolator construction
-        tree = KDTree(X_in_domain')
-
-        let indom = vec(in_domain) |> findall # store indices of non-blanked cells, only
-            # convert boundary SDFs and projs to vector notation instead of block-structured array
-            for (bname, sdf) in boundary_sdfs
-                boundary_sdfs[bname] = reshape(
-                    sdf, :
-                )[indom]
-            end
-            for (bname, projs) in boundary_projs
-                boundary_projs[bname] = reshape(
-                    projs, :, nd
-                )[indom, :]
-            end
-        end
-
-        # now, let's start partitioning the domain
-        partitions = Partition[]
-        pranges = partition_ranges(
-            length(blocks), max_partition_blocks
-        )
-
-        if verbose
-                println("Defining partition data...")
-        end
-        for prange in pranges
-            # slices for the current partition:
-            indom = selectdim(in_domain, 1, prange)
-            idx_indom = selectdim(index_in_domain, 1, prange)
-            ccenters = selectdim(cell_centers, 1, prange)
-
-            part_size = size(indom)
-
-            # convert to vector notation
-            X = reshape(ccenters, :, nd)
-            indom = vec(indom)
-            idx_indom = vec(idx_indom)
-            local_idx_indom = Int32.(findall(indom)) # indices of non-blanked cells among all in the 
-            # current partition
-
-            # obtain interpolator to current partition cells (including blanks)
-            intp = Interpolator(
-                X_in_domain,
-                X,
-                tree; 
-                linear = false, first_index = true
-            )
-            dom = NNInterpolator.domain(intp) # obtain domain of influence for interpolated points
-
-            # filter to non-blanked cells
-            idx_indom = idx_indom[local_idx_indom]
-
-            # convert interpolator and image indices to work on said domain of influence
-            hmap = NNInterpolator.index_map(dom)
-            intp = NNInterpolator.filtered(intp, hmap)
-            idx_indom = map(i -> hmap[i], idx_indom)
-
-            # filter to domain cells and obtain KD Tree
-            circumradius = radii[dom]
-            X = X_in_domain[dom, :]
-
-            part_tree = KDTree(X')
-
-            # define boundaries
             boundaries = Dict{String, Boundary}()
-            for bname in keys(boundary_projs)
-                # select domain cells
-                projs = selectdim(boundary_projs[bname], 1, dom)
-                sdfs = selectdim(boundary_sdfs[bname], 1, dom)
-
-                bdry = Boundary( # build boundary
-                    circumradius,
-                    X,
-                    projs, sdfs,
-                    part_tree,
-                    ghost_layer_ratio
+            for fam in keys(families)
+                boundaries[fam] = Boundary(
+                    circumradius, icenters,
+                    boundary_projs[fam][image, :], boundary_distances[fam][image],
+                    tree, ghost_layer_ratio; Xc = centers
                 )
 
-                boundaries[bname] = bdry
+                intp = boundaries[fam].image_interpolator
+                domain = union(
+                    domain, NNInterpolator.domain(intp)
+                )
+            end
+
+            # re-index boundary interpolators
+            hmap = NNInterpolator.index_map(domain)
+
+            image_in_domain = map(i -> hmap[i], image)
+            for (fam, bdry) in boundaries
+                boundaries[fam] = Boundary(
+                    NNInterpolator.filtered(bdry.image_interpolator, hmap),
+                    bdry.points, bdry.normals, bdry.image_distances, bdry.ghost_distances,
+                    image_in_domain[bdry.ghost_indices]
+                )
+            end
+
+            # now build new interpolators for the entire domain
+            pcenters = centers[domain, :]
+            pspacing = spacing[domain, :]
+            ptree = KDTree(pcenters')
+
+            stencils = Dict{NTuple{nd, Int32}, Interpolator}()
+            for pt in stencil_points
+                X = pcenters .+ pspacing .* collect(pt)'
+
+                intp = Interpolator(pcenters, X, ptree; 
+                    first_index = true, linear = false)
+                stencils[pt] = intp
             end
 
             push!(
-                partitions, Partition(
-                    part_size,
-                    blocks[1].size,
-                    (msh.widths[:, prange] ./ block_sizes) |> permutedims, # spacing
-                    intp,
-                    dom,
-                    idx_indom,
-                    local_idx_indom,
-                    reshape(indom, part_size...),
-                    blocks[prange],
-                    boundaries
+                partitions,
+                Partition(
+                    domain, image, image_in_domain,
+                    stencils, boundaries, pspacing, pcenters
                 )
             )
         end
 
         # finally,  let's create surface structs 
         surface_dict = Dict{String, Surface}()
-        # only for fine level!! No pproc on coarse levels!
-        if _mgrid_depth == 0
-            for (sname, stl, L) in surfaces
-                surface_dict[sname] = Surface(
-                    X_in_domain, tree, stl;
-                    max_length = L
-                )
-            end
-        end
-
-        # if we have more multigrid levels to construct, add coarser multigrid field
-        multigrid = nothing
-        if _mgrid_depth < multigrid_levels
-            multigrid = Domain(
-                    origin, widths, surfaces...;
-                    margin = margin, block_sizes = block_sizes,
-                    refinement_regions = refinement_regions, max_length = max_length,
-                    ghost_layer_ratio = ghost_layer_ratio, interior_point = interior_point,
-                    approximation_ratio = approximation_ratio, verbose = verbose,
-                    max_partition_blocks = max_partition_blocks, 
-                    multigrid_levels = multigrid_levels, families = families,
-                    _previous_pts_tree = (X_in_domain, tree),
-                    _mgrid_depth = _mgrid_depth + 1,
-                    _stltree_dict = _stltree_dict,
+        for (sname, stl, L) in surfaces
+            surface_dict[sname] = Surface(
+                centers, tree, stl;
+                max_length = L
             )
         end
 
-        dom = Domain(
-            n_in_domain,
-            array_size,
-            (msh.widths ./ block_sizes) |> permutedims,
-            blocks,
-            boundary_sdfs,
-            surface_dict,
+        Domain(
+            ndofs,
+            msh,
             partitions,
-            multigrid
+            surface_dict,
+            boundary_distances,
+        )
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Export surfaces and volume data to VTK file within a given folder.
+    Kwargs are treated as field properties (cell data).
+    """
+    function export_vtk(
+        folder::String,
+        dom::Domain;
+        include_volume::Bool = true,
+        include_surface::Bool = true,
+        kwargs...
+    )
+        if isdir(folder)
+            @warn "Overwriting VTK data in folder $folder"
+            rm(folder; recursive = true)
+        end
+        mkdir(folder)
+
+        field_data = Dict(
+            [
+                k => let pdims = circshift(1:ndims(v), -1) |> x -> tuple(x...)
+                    permutedims(v, pdims)
+                end for (k, v) in kwargs
+            ]...
         )
 
-        # return coarsener and prolongator if in a coarse mesh
-        if !isnothing(_previous_pts_tree)
-            if verbose
-                println("Building coarseners/prolongators at level $_mgrid_depth...")
-            end
-            fine_X, fine_tree = _previous_pts_tree
-
-            coarsener = Interpolator(fine_X, X_in_domain, fine_tree; 
-                linear = false, first_index = true)
-            prolongator = Interpolator(X_in_domain, fine_X, tree;
-                linear = false, first_index = true, n_neighbors = 1)
-
-            return (coarsener, dom, prolongator)
+        if include_volume
+            grid = Mesher.vtk_grid(
+                joinpath(folder, "volume"), dom.mesh; field_data...
+            )
+            Mesher.vtk_save(grid)
         end
 
-        # else return domain only
-        dom
+        if include_surface
+            vtm = Mesher.WriteVTK.vtk_multiblock(joinpath(folder, "surface"))
+
+            for (sname, surf) in dom.surfaces
+                surf_data = Dict(
+                    [
+                        k => let pdims = circshift(1:ndims(v), -1) |> x -> tuple(x...)
+                            permutedims(surf(v), pdims)
+                        end for (k, v) in kwargs
+                    ]...
+                )
+
+                grid = Mesher.STLHandler.stl2vtk(
+                    joinpath(folder, sname), surf.stereolitography, vtm;
+                    surf_data...)
+            end
+
+            Mesher.WriteVTK.vtk_save(vtm)
+        end
     end
 
     include("arraybends.jl")
@@ -842,41 +664,36 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Obtain values from an array in Cartesian grid format for a mesh partition.
-    
+    Obtain values at a given stencil point within a partition.
+
     Example:
 
     ```
-    u = rand(
-        length(domain), 3, 2
-    )
+    u = rand(length(domain))
+    ux = similar(u)
 
-    domain(u) do part, udom
-        U = part(udom)
-        # shape (nblocks, nx, ny[, nz], 3, 2)
+    domain(u, ux) do part, u, ux # values at local domain
+        dx, dy = part.spacing |> eachcol
+
+        ux .= ( # note that we're editing in-place
+            part(u, 1, 0) .- part(u, -1, 0)
+        ) ./ (2 .* dx)
     end
+
+    # ux is now the first, x-axis derivative of u
     ```
     """
-    function (part::Partition)(v::AbstractArray)
-        extra_dims = size(v)[2:end]
+    function (part::Partition)(
+        U::AbstractArray, inds::Int...
+    )
+        nd = size(part.spacing, 2)
+        pt = zeros(Int32, nd)
+        for (k, i) in enumerate(inds)
+            pt[k] = i
+        end
+        pt = tuple(pt...)
 
-        reshape(
-            part.interpolator(v), part.size..., extra_dims...
-        )
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Impose values from a block-Cartesian array `v` upon the 
-    correct indices of a flowfield array `vdom`
-    """
-    function update_partition!(part::Partition, vdom::AbstractArray, v::AbstractArray)
-        extra_dims = size(vdom)[2:end]
-
-        selectdim(vdom, 1, part.image) .= selectdim(
-            reshape(v, :, extra_dims...), 1, part.in_domain
-        );
+        part.stencils[pt](U)
     end
 
     """
@@ -892,14 +709,8 @@ module ImmersedBoundary
         # udom includes the parts of vector `u`
         # which affect the residual at partition `partition`.
 
-        U = part(udom) # obtain Cartesian representation
-        # of u. Shape (nblocks, nx, ny[, nz])
-        R = part(rdom)
-
         # now do some Cartesian grid operations and
-        # update R
-
-        ibm.update_partition!(part, rdom, R) # send values to `rdom`
+        # update rdom
     end
 
     # after the loop, the values of `rdom` are returned to
@@ -921,7 +732,7 @@ module ImmersedBoundary
     ```
     dom(
         u;
-        conv_to_backend = CuArray,
+        conv_to_backend = CuArray, # may also be a custom function
         conv_from_backend = Array
     ) do part, udom
         @show typeof(udom) # CuArray
@@ -959,7 +770,7 @@ module ImmersedBoundary
             end
 
             for (a, pa) in zip(args, pargs)
-                selectdim(a, 1, part.domain) .= pa
+                selectdim(a, 1, part.image) .= selectdim(pa, 1, part.image_in_domain)
             end
 
             r
@@ -976,6 +787,8 @@ module ImmersedBoundary
 
     ```
     dom(u, v) do part, udom, vdom
+        # function receives values of field properties at image points
+        # and returns their values at the boundary
         ibm.impose_bc!(part, "wall", udom, vdom) do bdry, uimage, vimage
             nx, ny = bdry.normals |> eachcol
             un = @. nx * uimage + ny * vimage
@@ -1061,171 +874,6 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Clip margins from block-shaped array
-    """
-    view_clip_margins(blck::Block, a::AbstractArray) = let s = blck.size
-        nd = length(s)
-        i = [
-            (
-                i <= nd ?
-                ((blck.margin + 1):(blck.margin + s[i])) :
-                Colon()
-            ) for i = 1:ndims(a)
-        ]
-
-        view(a, i...)
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Export domain to VTK format.
-
-    Builds a folder `fname` where all of the .vtr and .vtm files are stored.
-    Kwargs are saved as cell data.
-    """
-    function export_vtk(
-        fname::String,
-        dom::Domain;
-        include_volume::Bool = true,
-        include_surface::Bool = true,
-        kwargs...
-    )
-        # create directory
-        if isdir(fname)
-            @warn "Overwrite on output dir. $fname"
-            rm(fname; recursive = true, force = true)
-        end
-        mkdir(fname)
-
-        if include_volume
-            vtm = vtk_multiblock(
-                joinpath(fname, "volume")
-            )
-
-            for part in dom.partitions
-                # for each part, obtain block-structured data
-                part_kwargs = Dict(
-                    [
-                        k => selectdim(
-                            v, 1, part.domain
-                        ) |> part for (k, v) in kwargs
-                    ]...
-                )
-
-                # create blocks
-                for (ib, block) in enumerate(part.blocks)
-                    vtk = vtk_grid(
-                        vtm,
-                        [
-                            LinRange(o, o + w, s + 1) for (o, w, s) in zip(
-                                block.origin, block.widths, block.size
-                            )
-                        ]...
-                    )
-
-                    for (k, v) in part_kwargs
-                        vblock = view_clip_margins(
-                            block, selectdim(v, 1, ib) |> copy
-                        )
-                        nd = length(block.size)
-                        vblock = permutedims( # permute dimensions to match WriteVTK convention
-                            vblock, (
-                                ((nd + 1):ndims(vblock))..., (1:nd)...
-                            )
-                        )
-
-                        vtk[String(k)] = vblock
-                    end
-                end
-            end
-
-            vtk_save(vtm)
-        end
-
-        if include_surface
-            vtm = WriteVTK.vtk_multiblock(
-                joinpath(fname, "surface")
-            )
-
-            for (sname, surf) in dom.surfaces
-                surf_kwargs = Dict(
-                    [
-                        k => let vs = surf(v)
-                            # if we have more than one dimension, reverse the first and last dimension (stl2vtk convention)
-                            if ndims(vs) > 1
-                                vs = permutedims(
-                                    vs, ((2:ndims(vs))..., 1)
-                                )
-                            end
-
-                            vs
-                        end for (k, v) in kwargs
-                    ]...
-                )
-
-                stl2vtk(
-                    joinpath(fname, sname), surf.stereolitography, vtm;
-                    surf_kwargs...
-                )
-            end
-
-            vtk_save(vtm)
-        end
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain a block-structured array with the cell centers of a partition.
-    Returns an array of shape `(nblocks, nx, ny[, nz], ndims)`
-    """
-    cell_centers(part::Partition) = let centers = Array{Float64}(
-        undef, part.size..., length(part.size) - 1
-    )
-        for (ib, block) in enumerate(part.blocks)
-            for inds in cartesian_indices(block)
-                centers[ib, inds..., :] .= cell_center(block, inds...)
-            end
-        end
-
-        centers
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain values at a given stencil point given indices and a block-structured array.
-
-    Example:
-
-    ```
-    u = rand(length(domain))
-    ux = similar(u)
-
-    domain(u, ux) do part, udom, uxdom
-        U = part(udom)
-        Ux = part(uxd)
-
-        dx, dy = part.spacing |> eachcol
-
-        Ux .= (
-            part(U, 1, 0) .- part(U, -1, 0)
-        ) ./ (2 .* dx)
-
-        ibm.update_partition!(part, uxdom, Ux)
-    end
-
-    # ux is now the first, x-axis derivative of u
-    ```
-    """
-    (part::Partition)(
-        U::AbstractArray, inds::Int...
-    ) = circshift(U, (0, (@. - inds)...))
-
-    """
-    $TYPEDSIGNATURES
-
     Obtain stencil index `i` along dimension `dim` in block-structured array.
     `part(u, 0, 3, 0)` is equivalent to `ibm.getalong(part, u, 2, 3)`, for example
     """
@@ -1305,7 +953,7 @@ module ImmersedBoundary
     Obtain a backward derivative along dimension `dim`.
     """
     ∇(part::Partition, u::AbstractArray, dim::Int64) = let uim1 = getalong(part, u, dim, -1)
-        (u .- uim1) ./ part.spacing[:, dim]
+        (part(u) .- uim1) ./ part.spacing[:, dim]
     end
 
     """
@@ -1314,7 +962,7 @@ module ImmersedBoundary
     Obtain a forward derivative along dimension `dim`.
     """
     Δ(part::Partition, u::AbstractArray, dim::Int64) = let uip1 = getalong(part, u, dim, 1)
-        (uip1 .- u) ./ part.spacing[:, dim]
+        (uip1 .- part(u)) ./ part.spacing[:, dim]
     end
 
     """
@@ -1334,7 +982,7 @@ module ImmersedBoundary
     Obtain the average of a property at face `i + 1/2` along dimension `dim`.
     """
     μ(part::Partition, u::AbstractArray, dim::Int64) = (
-        getalong(part, u, dim, 1) .+ u
+        getalong(part, u, dim, 1) .+ part(u)
     ) ./ 2
 
     """
@@ -1357,27 +1005,6 @@ module ImmersedBoundary
         uavg ./ cnt
     end
 
-    """
-    $TYPEDSIGNATURES
-
-    Obtain average of cell properties at all cell blocks in a partition.
-    Receives block-structured array (shape `(nblocks, nx, ny[, nz], inds...)`)
-    and returns another with collapsed grid dimensions (`(nblocks, 1, 1[, 1], inds...)`).
-
-    This makes it easier to perform coarsening of block-structured data:
-
-    ```
-    Ucoarse .= ibm.block_average(part, U)
-    ```
-    """
-    block_average(part::Partition, A::AbstractArray; include_blank::Bool = false) = let nd = length(part.size)
-        sum(A .* part.is_in_domain; dims = 2:nd) ./ (
-                include_blank ?
-                prod(part.block_size) :
-                sum(part.is_in_domain; dims = 2:nd)
-        )
-    end
-
     include("cfd.jl")
     using .CFD
 
@@ -1397,13 +1024,10 @@ module ImmersedBoundary
             Q, dt;
             conv_to_backend = conv_to_backend,
             conv_from_backend = conv_from_backend
-        ) do part, Qdom, dtdom
-            dtblock = part(dtdom)
-            Qblock = part(Qdom)
+        ) do part, Q, dt
+            prims = CFD.state2primitive(fluid, eachslice(Q; dims = ndims(Q))...)
 
-            prims = CFD.state2primitive(fluid, eachslice(Qblock; dims = ndims(Qblock))...)
-
-            dtblock .= Inf64
+            dt .= Inf64
 
             nd = length(prims) - 2
 
@@ -1412,10 +1036,8 @@ module ImmersedBoundary
                 v = prims[2 + i]
                 dx = @view part.spacing[:, i]
 
-                @. dtblock = min(dtblock, dx / (abs(v) + a))
+                @. dt = min(dt, dx / (abs(v) + a))
             end
-
-            update_partition!(part, dtdom, dtblock)
         end
 
         dt
