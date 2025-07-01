@@ -552,10 +552,9 @@ module ImmersedBoundary
             image_in_domain = map(i -> hmap[i], image)
             for (fam, bdry) in boundaries
                 boundaries[fam] = Boundary(
-                    NNInterpolator.filtered(bdry.image_interpolator, hmap), 
-                    bdry.points, bdry.normals,
-                    bdry.image_distances, bdry.ghost_distances, 
-                    image_in_domain[bdry.ghost_indices],
+                    NNInterpolator.filtered(bdry.image_interpolator, hmap),
+                    bdry.points, bdry.normals, bdry.image_distances, bdry.ghost_distances,
+                    image_in_domain[bdry.ghost_indices]
                 )
             end
 
@@ -771,7 +770,7 @@ module ImmersedBoundary
             end
 
             for (a, pa) in zip(args, pargs)
-                selectdim(a, 1, part.domain) .= pa
+                selectdim(a, 1, part.image) .= selectdim(pa, 1, part.image_in_domain)
             end
 
             r
