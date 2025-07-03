@@ -537,6 +537,44 @@ module STLHandler
     end
 
     """
+    $TYPEDSIGNATURES
+
+    Find if a point is within a given range of an STL tree
+    """
+    function in_range(
+        node::STLTree, x::AbstractVector{Float64}, R::Float64
+    )
+        if isleaf(node)
+            p = proj2stl(node.stl, x)
+            d = norm(p .- x)
+
+            return d <= R
+        end
+
+        if minimum_distance(node.box, x) > R
+            return false
+        end
+
+        mdist_left = minimum_distance(node.left_child.box, x)
+        mdist_right = minimum_distance(node.right_child.box, x)
+
+        if mdist_left > R && mdist_right > R
+            return false
+        end
+
+        if mdist_left < mdist_right
+            return (
+                in_range(node.left_child, x, R) || in_range(node.right_child, x, R)
+            )
+        end
+
+        (
+            in_range(node.right_child, x, R) || in_range(node.left_child, x, R)
+        )
+
+    end
+
+    """
     Get simplex normal
     """
     function normal(simplex::AbstractMatrix{Float64})
