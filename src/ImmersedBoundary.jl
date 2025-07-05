@@ -819,11 +819,15 @@ module ImmersedBoundary
     Note that other field variable args. may be passed, even if the 
     BC function returns only a few return values at the boundary
     (which will be edited).
+
+    We may directly return ghost cell values rather than boundary values
+    by activating flag `impose_at_ghost`.
     """
     function impose_bc!(
         f,
         part::Partition, bname::String,
         args::AbstractArray{Float64}...;
+        impose_at_ghost::Bool = false,
         kwargs...
     )
         bdry = part.boundaries[bname]
@@ -843,15 +847,20 @@ module ImmersedBoundary
         end
 
         for (b, a) in zip(bargs, args)
-            gd = bdry.ghost_distances
-            id = bdry.image_distances
-            η = @. gd / id
-
             av = selectdim(
                 a, 1, bdry.ghost_indices
             )
 
-            av .= η .* av .+ (1.0 .- η) .* b
+            if impose_at_ghost
+                av .= b
+            else
+                gd = bdry.ghost_distances
+                id = bdry.image_distances
+
+                η = @. gd / id
+
+                av .= η .* av .+ (1.0 .- η) .* b
+            end
         end
 
         return
