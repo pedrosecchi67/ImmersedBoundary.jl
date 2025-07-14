@@ -9,7 +9,8 @@ module STLHandler
     using Statistics
     using LinearAlgebra
 
-    export Stereolitography, STLTree, point_in_polygon, stl2vtk, refine_to_length
+    export Stereolitography, STLTree, point_in_polygon, stl2vtk, refine_to_length,
+        centers_and_normals, feature_edges
         
     module STLReader
 
@@ -936,6 +937,123 @@ module STLHandler
 
         merge(stl)
 
+    end
+
+    function _simplex_normal(simplex::Matrix{Float64})
+
+        p0 = simplex[:, 1]
+
+        if size(simplex, 1) == 2 # 2D
+            dx = simplex[:, 2] .- p0
+
+            return [
+                dx[2], - dx[1]
+            ]
+        end
+
+        u = simplex[:, 2] .- p0
+        v = simplex[:, 3] .- p0
+
+        cross(u, v) ./ 2
+
+    end
+
+    _simplex_center(simplex::Matrix{Float64}) = dropdims(
+        sum(simplex; dims = 2); dims = 2
+    ) ./ size(simplex, 2)
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain simplex centers and normals (with norms equal to simplex areas).
+    """
+    function centers_and_normals(stl::Stereolitography)
+
+        simplices = map(
+            simp -> stl.points[:, simp], eachcol(stl.simplices)
+        )
+
+        centers = reduce(
+            hcat,
+            map(
+                _simplex_center, simplices
+            )
+        )
+        normals = reduce(
+            hcat,
+            map(
+                _simplex_normal, simplices
+            )
+        )
+
+        (centers, normals)
+
+    end
+
+    _face2tag(f::AbstractVector{Int64}) = sort(f) |> f -> tuple(f...)
+
+    """
+    $TYPEDSIGNATURES
+
+    Find edges that violate minimum radius and maximum normal angle criteria
+    """
+    function feature_edges(stl::Stereolitography;
+        angle::Float64 = 15.0,
+        radius::Float64 = Inf64,
+        include_boundaries::Bool = true)
+        ϵ = eps(Float64)
+        nd = size(stl.points, 1)
+
+        T = NTuple{nd - 1, Int64}
+
+        angle = deg2rad(angle)
+
+        edges = Tuple{T, Int64, Int64}[]
+        registry = Dict{T, Int64}()
+        for (i, simp) in eachcol(stl.simplices) |> enumerate
+            for pivot in simp
+                face = _face2tag(
+                    setdiff(simp, pivot)
+                )
+
+                if haskey(registry, face)
+                    push!(
+                        edges, (face, registry[face], i)
+                    )
+                    delete!(registry, face)
+                else
+                    registry[face] = i
+                end
+            end
+        end
+
+        # add remaning (border) faces too
+        for (face, ind) in registry
+            push!(edges, (face, ind, ind))
+        end
+
+        centers, normals = centers_and_normals(stl)
+
+        new_simplices = T[]
+        for (face, i, j) in edges
+            ni = normals[:, i]
+            nj = normals[:, j]
+
+            ni ./= (norm(ni) + ϵ)
+            nj ./= (norm(nj) + ϵ)
+
+            θ = acos(
+                max(ni ⋅ nj, 0.05)
+            )
+            d = norm(centers[:, i] .- centers[:, j])
+
+            if (i == j && include_boundaries) || (d / θ < radius) || (θ > angle)
+                push!(new_simplices, face)
+            end
+        end
+
+        Stereolitography(stl.points, 
+            mapreduce(collect, hcat, new_simplices))
     end
 
 end

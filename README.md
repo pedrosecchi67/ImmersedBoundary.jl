@@ -91,7 +91,11 @@ Generate an octree mesh defined by:
             ibm.Ball([0.0, 0.0], 0.1) => 0.005,
             ibm.Ball([1.0, 0.0], 0.1) => 0.005,
             ibm.Box([-1.0, -1.0], [3.0, 2.0]) => 0.0025,
-            ibm.Line([1.0, 0.0], [2.0, 0.0]) => 0.005
+            ibm.Line([1.0, 0.0], [2.0, 0.0]) => 0.005,
+            ibm.Triangulation(
+                ibm.feature_edges(stl;
+                    angle = 10.0, radius = 0.05) # detects feature edges in solids
+            ) => 0.001
         ]
         ```
 * A maximum cell size (optional);

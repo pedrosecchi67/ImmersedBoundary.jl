@@ -4,14 +4,18 @@ import ImmersedBoundary as ibm
 
 stl = ibm.Stereolitography("n0012.dat")
 
+tri = ibm.Triangulation(
+    ibm.feature_edges(stl;
+        angle = 10.0, radius = 0.05)
+)
+
 L = 20.0
 
 dom = ibm.Domain(
     [-L/2, -L/2], [L, L],
     ("wall", stl, 0.01);
     refinement_regions = [
-        ibm.Ball([0.0, 0.0], 0.0) => 0.0025,
-        ibm.Ball([1.0, 0.0], 0.0) => 0.0025,
+        tri => 0.0025,
     ],
     max_partition_cells = 5000,
     verbose = true

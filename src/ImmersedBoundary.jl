@@ -2,11 +2,11 @@ module ImmersedBoundary
 
     include("mesher.jl")
     import .Mesher as mshr
-    using .Mesher: Stereolitography, Ball, Box, Line,
+    using .Mesher: Stereolitography, Ball, Box, Line, Triangulation,
         PlaneSDF, TriReference, Projection
     using .Mesher.WriteVTK
     using .Mesher.STLHandler: STLTree, point_in_polygon, 
-        refine_to_length, stl2vtk
+        refine_to_length, stl2vtk, centers_and_normals, feature_edges
 
     using .Mesher.DocStringExtensions
     using .Mesher.LinearAlgebra
@@ -84,57 +84,6 @@ module ImmersedBoundary
             image_distances, ghost_distances,
             ghost_indices
         )
-    end
-
-    function _simplex_normal(simplex::Matrix{Float64})
-
-        p0 = simplex[:, 1]
-
-        if size(simplex, 1) == 2 # 2D
-            dx = simplex[:, 2] .- p0
-
-            return [
-                dx[2], - dx[1]
-            ]
-        end
-
-        u = simplex[:, 2] .- p0
-        v = simplex[:, 3] .- p0
-
-        cross(u, v) ./ 2
-
-    end
-
-    _simplex_center(simplex::Matrix{Float64}) = dropdims(
-        sum(simplex; dims = 2); dims = 2
-    ) ./ size(simplex, 2)
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain simplex centers and normals (with norms equal to simplex areas).
-    """
-    function centers_and_normals(stl::Mesher.Stereolitography)
-
-        simplices = map(
-            simp -> stl.points[:, simp], eachcol(stl.simplices)
-        )
-
-        centers = reduce(
-            hcat,
-            map(
-                _simplex_center, simplices
-            )
-        )
-        normals = reduce(
-            hcat,
-            map(
-                _simplex_normal, simplices
-            )
-        )
-
-        (centers, normals)
-
     end
 
     """

@@ -364,6 +364,36 @@ module Mesher
         end
 
         """
+        ```
+            struct Triangulation
+                tree::STLTree
+
+                Triangulation(stl::Stereolitography) = new(
+                    STLTree(stl)
+                )
+            end
+        ```
+
+        Struct to define the distance function to a triangulated surface
+        """
+        struct Triangulation
+            tree::STLTree
+
+            Triangulation(stl::Stereolitography) = new(
+                STLTree(stl)
+            )
+        end
+
+        """
+        ```
+            (tri::Triangulation)(pt::AbstractVector)
+        ```
+
+        Distance to a triangulated surface
+        """
+        (tri::Triangulation)(pt::AbstractVector) = tri.tree(pt)[2]
+
+        """
         $TYPEDSIGNATURES
 
         Simplify triangulation references.
