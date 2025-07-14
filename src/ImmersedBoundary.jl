@@ -1020,21 +1020,22 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Obtain time step length for CFL = 1 at each cell. Returns a vector.
+    Obtain time step length for CFL = 1 at each cell given matrix of primitive
+    variables (columns `p, T, u, v[, w]`). Returns a vector.
     """
     timescale(
         dom::Domain,
         fluid::CFD.Fluid,
-        Q::AbstractMatrix{Float64};
+        P::AbstractMatrix{Float64};
         conv_to_backend = nothing,
         conv_from_backend = nothing
     ) = let dt = Vector{Float64}(undef, length(dom))
         dom(
-            Q, dt;
+            P, dt;
             conv_to_backend = conv_to_backend,
             conv_from_backend = conv_from_backend
-        ) do part, Q, dt
-            prims = CFD.state2primitive(fluid, eachslice(Q; dims = ndims(Q))...)
+        ) do part, P, dt
+            prims = eachcol(P)
 
             dt .= Inf64
 
@@ -1055,7 +1056,7 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Run wall boundary condition on state variables.
+    Run wall boundary condition on primitive variables.
     Imposes vel. gradient if specified, or laminar (Dirichlet 0) wall
     if `laminar = true`. Otherwise, uses an Euler wall.
 
@@ -1063,7 +1064,7 @@ module ImmersedBoundary
     The function should have the format:
     
     ```
-    dV!dn = du!dn(bdry, V, Q, args...; kwargs...)
+    dV!dn = du!dn(bdry, V, P, args...; kwargs...)
     ```
 
     Where `V = |u|` is the non-normal velocity magnitude at the image points, 
@@ -1073,15 +1074,14 @@ module ImmersedBoundary
     """
     function wall_bc(
         bdry::Boundary,
-        Q::AbstractMatrix{Float64},
+        P::AbstractMatrix{Float64},
         args::AbstractArray...;
         laminar::Bool = false,
         du!dn = nothing,
         fluid::CFD.Fluid,
         kwargs...
     )
-        state = eachcol(Q)
-        prims = CFD.state2primitive(fluid, state...)
+        prims = eachcol(P)
 
         nd = length(prims) - 2
         if laminar # if laminar, zero at wall!
@@ -1119,7 +1119,7 @@ module ImmersedBoundary
                 @. V = sqrt(V)
 
                 ϵ = eps(Float64)
-                dV!dn = du!dn(bdry, V, Q, args...; kwargs...)
+                dV!dn = du!dn(bdry, V, P, args...; kwargs...)
                 Vratio = @. (V - dV!dn * bdry.image_distances) / (V + ϵ)
 
                 for i = 1:nd
@@ -1130,7 +1130,7 @@ module ImmersedBoundary
             end
         end
 
-        CFD.primitive2state(fluid, prims...) |> x -> hcat(x...)
+        hcat(prims...)
     end
 
     """
@@ -1140,14 +1140,13 @@ module ImmersedBoundary
     """
     function freestream_bc(
         bdry::Boundary,
-        Q::AbstractMatrix{Float64};
+        P::AbstractMatrix{Float64};
         freestream::CFD.Freestream
     )
         fluid = freestream.fluid
         free = freestream # an alias
 
-        state = eachcol(Q)
-        prims = CFD.state2primitive(fluid, state...)
+        prims = eachcol(P)
 
         p = prims[1]
         T = prims[2]
@@ -1184,7 +1183,7 @@ module ImmersedBoundary
 
         @. p = dirichlet * free.p + (1.0 - dirichlet) * p
 
-        CFD.primitive2state(fluid, prims...) |> x -> hcat(x...)
+        hcat(prims...)
     end
 
 end

@@ -159,20 +159,50 @@ module CFD
     """
     $TYPEDSIGNATURES
 
-    HLL Riemann solver flux evaluation. Receives state variable matrices
-    (one row per state variable) or block-structured arrays (last dim for
-    state variable) and a dimension number
+    Turn array of state variables to array of primitive variables
     """
-    function HLL(Ql::AbstractArray, Qr::AbstractArray, dim::Int64, fluid::Fluid)
+    state2primitive(fld::Fluid, Q::AbstractArray) = let (q, s) = block2mat(Q)
+        p = similar(q)
+        for (prim, row) in zip(
+            state2primitive(fld, eachrow(q)...), eachrow(p)
+        )
+            row .= prim
+        end
+        mat2block(p, s)
+    end
 
-        Ql, bsize = block2mat(Ql)
-        Qr, _ = block2mat(Qr)
+    """
+    $TYPEDSIGNATURES
 
-        state_l = eachrow(Ql)
-        state_r = eachrow(Qr)
+    Turn array of primitive variables to array of state variables
+    """
+    primitive2state(fld::Fluid, P::AbstractArray) = let (p, s) = block2mat(P)
+        q = similar(p)
+        for (stat, row) in zip(
+            primitive2state(fld, eachrow(p)...), eachrow(q)
+        )
+            row .= stat
+        end
+        mat2block(q, s)
+    end
 
-        prims_l = state2primitive(fluid, state_l...)
-        prims_r = state2primitive(fluid, state_r...)
+    """
+    $TYPEDSIGNATURES
+
+    HLL Riemann solver flux evaluation. Receives primitive variable matrices
+    (one row per prim. variable) or block-structured arrays (last dim for
+    prim. variable) and a dimension number
+    """
+    function HLL(Pl::AbstractArray, Pr::AbstractArray, dim::Int64, fluid::Fluid)
+
+        Pl, bsize = block2mat(Pl)
+        Pr, _ = block2mat(Pr)
+
+        prims_l = eachrow(Pl)
+        prims_r = eachrow(Pr)
+
+        Ql = primitive2state(fluid, Pl)
+        Qr = primitive2state(fluid, Pr)
 
         pl = prims_l[1]
         Tl = prims_l[2]
@@ -225,20 +255,20 @@ module CFD
     """
     $TYPEDSIGNATURES
 
-    AUSM scheme flux evaluation. Receives state variable matrices
-    (one row per state variable) or block-structured arrays (last dim for
-    state variable) and a dimension number
+    AUSM scheme flux evaluation. Receives primitive variable matrices
+    (one row per prim. variable) or block-structured arrays (last dim for
+    prim. variable) and a dimension number
     """
-    function AUSM(Ql::AbstractArray, Qr::AbstractArray, dim::Int64, fluid::Fluid)
+    function AUSM(Pl::AbstractArray, Pr::AbstractArray, dim::Int64, fluid::Fluid)
 
-        Ql, bsize = block2mat(Ql)
-        Qr, _ = block2mat(Qr)
+        Pl, bsize = block2mat(Pl)
+        Pr, _ = block2mat(Pr)
 
-        state_l = eachrow(Ql)
-        state_r = eachrow(Qr)
+        prims_l = eachrow(Pl)
+        prims_r = eachrow(Pr)
 
-        prims_l = state2primitive(fluid, state_l...)
-        prims_r = state2primitive(fluid, state_r...)
+        Ql = primitive2state(fluid, Pl)
+        Qr = primitive2state(fluid, Pr)
 
         pl = prims_l[1]
         Tl = prims_l[2]
@@ -274,29 +304,32 @@ module CFD
     """
     $TYPEDSIGNATURES
 
-    JST-KE scheme fluxes
+    JST-KE scheme fluxes from primitive variable arrays
     """
     function JSTKE(
-        Qim1::AbstractArray{Float64},
-        Qi::AbstractArray{Float64},
-        Qip1::AbstractArray{Float64},
-        Qip2::AbstractArray{Float64},
+        Pim1::AbstractArray{Float64},
+        Pi::AbstractArray{Float64},
+        Pip1::AbstractArray{Float64},
+        Pip2::AbstractArray{Float64},
         dim::Int64, fluid::Fluid
     )
 
-        Qim1, bsize = block2mat(Qim1)
-        Qi, _ = block2mat(Qi)
-        Qip1, _ = block2mat(Qip1)
-        Qip2, _ = block2mat(Qip2)
+        Pim1, bsize = block2mat(Pim1)
+        Pi, _ = block2mat(Pi)
+        Pip1, _ = block2mat(Pip1)
+        Pip2, _ = block2mat(Pip2)
 
-        pim1 = state2primitive(fluid, eachrow(Qim1)...)[1]
-        p, T, v = let prims = state2primitive(fluid, eachrow(Qi)...)
-            (prims[1], prims[2], prims[dim + 2])
-        end
-        pip1, Tip1, vip1 = let prims = state2primitive(fluid, eachrow(Qip1)...)
-            (prims[1], prims[2], prims[dim + 2])
-        end
-        pip2 = state2primitive(fluid, eachrow(Qip2)...)[1]
+        pim1 = @view Pim1[1, :]
+        p = @view Pi[1, :]
+        T = @view Pi[2, :]
+        v = @view Pi[2 + dim, :]
+        pip1 = @view Pip1[1, :]
+        Tip1 = @view Pip1[2, :]
+        vip1 = @view Pip1[2 + dim, :]
+        pip2 = @view Pip2[1, :]
+
+        Qi = primitive2state(fluid, Pi)
+        Qip1 = primitive2state(fluid, Pip1)
 
         a = speed_of_sound(fluid, T)
         aip1 = speed_of_sound(fluid, Tip1)
@@ -310,10 +343,11 @@ module CFD
                 abs(v) + a, abs(vip1) + aip1
         )
 
-        Q = @. (Qi + Qip1) / 2
-        prims = state2primitive(fluid, eachrow(Q)...)
-        p = prims[1]
-        v = prims[dim + 2]
+        P = @. (Pi + Pip1) / 2
+        Q = primitive2state(fluid, P)
+
+        p = @view P[1, :]
+        v = @view P[dim + 2, :]
 
         E = Q .* v'
         E[2, :] .+= (p .* v)

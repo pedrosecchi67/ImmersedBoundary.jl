@@ -32,22 +32,25 @@ ibm.CFD.rotate_and_rescale!(free_old, free, ρ, E, ρu, ρv)
 Q = [ρ E ρu ρv]
 
 for _ = 1:10
-    dt = ibm.timescale(dom, fluid, Q) |> minimum
+    P = ibm.CFD.state2primitive(fluid, Q)
+    dt = ibm.timescale(dom, fluid, P) |> minimum
     dt *= 0.5
 
     let Qnew = copy(Q)
-        dom(Q, Qnew) do part, Q, Qnew
+        dom(Q, P, Qnew) do part, Q, P, Qnew
             for i = 1:2
-                Ql, Qr = ibm.MUSCL(part, Q, i)
+                Pl, Pr = ibm.MUSCL(part, P, i)
 
-                Qnew .-= dt .* ibm.∇(part, ibm.CFD.HLL(Ql, Qr, i, fluid), i)
+                Qnew .-= dt .* ibm.∇(part, ibm.CFD.HLL(Pl, Pr, i, fluid), i)
             end
+
+            Pnew = ibm.CFD.state2primitive(fluid, Qnew)
 
             ibm.impose_bc!(
                 ibm.wall_bc,
                 part, "wall",
-                Qnew; fluid = fluid,
-                du!dn = (b, v, q) -> let dv = similar(v)
+                Pnew; fluid = fluid,
+                du!dn = (b, v, p) -> let dv = similar(v)
                     dv .= 100.0
                     dv
                 end
@@ -55,9 +58,11 @@ for _ = 1:10
             ibm.impose_bc!(
                 ibm.freestream_bc,
                 part, "FARFIELD",
-                Qnew;
+                Pnew;
                 freestream = free
             )
+
+            Qnew .= ibm.CFD.primitive2state(fluid, Pnew)
         end
 
         Q .= Qnew
