@@ -133,6 +133,48 @@ module STLHandler
     """
     $TYPEDSIGNATURES
 
+    Merge points in an STL surface.
+    """
+    function merge(stl::Stereolitography, h::Float64 = 1e-7)
+        nd = size(stl.points, 1)
+        T = NTuple{nd, Int64}
+
+        registry = Dict{T, Int64}()
+
+        N = 0
+        newinds = zeros(Int64, size(stl.points, 2))
+        isvalid = falses(length(newinds))
+        for (ipt, ptind) in eachcol(
+            map(
+                x -> round(x / h) |> Int64, stl.points
+            )
+        ) |> enumerate
+            tag = tuple(ptind...)
+
+            if haskey(registry, tag)
+                newinds[ipt] = registry[tag]
+                isvalid[ipt] = false
+            else
+                N += 1
+                registry[tag] = N
+                newinds[ipt] = N
+                isvalid[ipt] = true
+            end
+        end
+
+        points = stl.points[:, isvalid]
+        simplices = newinds[stl.simplices]
+
+        isvalid = map(simp -> (length(unique(simp)) == length(simp)), 
+            eachcol(simplices))
+        simplices = simplices[:, isvalid]
+
+        Stereolitography(points, simplices)
+    end
+
+    """
+    $TYPEDSIGNATURES
+
     Constructor for Stereolitography that builds a (closed if `closed = true`)
     two-dimensional surface from a set of points (matrix `(ndims, npts)`)
     """
@@ -892,7 +934,7 @@ module STLHandler
             stl, nnew = _cut_larger(stl, Lmax)
         end
 
-        stl
+        merge(stl)
 
     end
 
