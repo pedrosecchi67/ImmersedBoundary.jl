@@ -105,7 +105,7 @@ module NNInterpolator
         )
             if any(isp)
                 mw = maximum(w)
-                isp .*= (w == mw)
+                isp .*= (w == mw) # ensure only one fetching point per stencil
             end
         end
 
