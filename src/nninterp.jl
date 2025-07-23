@@ -34,14 +34,14 @@ module NNInterpolator
 
     If `n_neighbors` is not given, it is set to `2 ^ ndims`.
 
-    If the weight of a single point is such that `abs(w - 1) < tolerance`, the interpolation is replaced
+    If the weight of a single point is such that `w > tolerance`, the interpolation is replaced
     by a simple fetching of the point.
     """
     function Interpolator(Xc::AbstractMatrix, X::AbstractMatrix, 
         tree::Union{KDTree, Nothing} = nothing;
         linear::Bool = true,
         first_index::Bool = false,
-        tolerance::Float64 = 1e-3,
+        tolerance::Float64 = 1.0 - 1e-3,
         n_neighbors::Int = 0)
 
         if first_index
@@ -98,13 +98,15 @@ module NNInterpolator
             end
         end
 
-        is_same_point = @. weights >= 1.0 - tolerance
+        is_same_point = @. weights >= tolerance
         # find if all other weigths are zero
-        let is_near_zero = map(
-            c -> sum(abs.(c) .< tolerance) == kneighs - 1,
-            eachcol(weights)
+        for (w, isp) in zip(
+            eachcol(weights), eachcol(is_same_point)
         )
-            is_same_point .*= is_near_zero'
+            if any(isp)
+                mw = maximum(w)
+                isp .*= (w == mw)
+            end
         end
 
         should_fetch = map(any, eachcol(is_same_point))
