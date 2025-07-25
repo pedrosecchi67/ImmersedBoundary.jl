@@ -467,7 +467,7 @@ module ImmersedBoundary
                 X = icenters .+ ispacing .* collect(pt)'
 
                 intp = Interpolator(centers, X, tree; 
-                    first_index = true, linear = false, tolerance = 1.0 / (2 ^ nd) + 0.01)
+                    first_index = true, linear = false)
 
                 domain = union(
                     domain, NNInterpolator.domain(intp)

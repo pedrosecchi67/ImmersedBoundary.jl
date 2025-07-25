@@ -33,15 +33,11 @@ module NNInterpolator
     Note that, if `first_index` is true, then `Xc, X` will also be expected to have shape `(npts, ndims)`.
 
     If `n_neighbors` is not given, it is set to `2 ^ ndims`.
-
-    If the weight of a single point is such that `w > tolerance`, the interpolation is replaced
-    by a simple fetching of the point.
     """
     function Interpolator(Xc::AbstractMatrix, X::AbstractMatrix, 
         tree::Union{KDTree, Nothing} = nothing;
         linear::Bool = true,
         first_index::Bool = false,
-        tolerance::Float64 = 1.0 - 1e-3,
         n_neighbors::Int = 0)
 
         if first_index
@@ -98,15 +94,14 @@ module NNInterpolator
             end
         end
 
-        is_same_point = @. weights >= tolerance
+        threshold = sqrt(eps(eltype(dists)))
+        is_same_point = @. abs(weights - 1.0) < threshold
         # find if all other weigths are zero
-        for (w, isp) in zip(
-            eachcol(weights), eachcol(is_same_point)
+        let is_near_zero = map(
+            c -> sum(abs.(c) .< threshold) == kneighs - 1,
+            eachcol(weights)
         )
-            if any(isp)
-                mw = maximum(w)
-                isp .*= (w == mw) # ensure only one fetching point per stencil
-            end
+            is_same_point .*= is_near_zero'
         end
 
         should_fetch = map(any, eachcol(is_same_point))
