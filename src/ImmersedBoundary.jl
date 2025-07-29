@@ -313,7 +313,7 @@ module ImmersedBoundary
             refinement_regions::AbstractVector = [],
             max_length::Float64 = Inf,
             growth_ratio::Float64 = 1.1,
-            ghost_layer_ratio::Tuple = (-1.1, 2.1),
+            ghost_layer_ratio::Tuple = (-1.1, 0.0),
             interior_point = nothing,
             approximation_ratio::Float64 = 2.0,
             verbose::Bool = false,
