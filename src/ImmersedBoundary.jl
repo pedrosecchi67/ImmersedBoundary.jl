@@ -69,7 +69,7 @@ module ImmersedBoundary
         @. normals /= (ghost_distances + sign(ghost_distances) * ϵ)
 
         # obtain image distance as per heuristics
-        sqnd = sqrt(size(normals, 2))
+        sqnd = sqrt(2.0) # sqrt(size(normals, 2))
         image_distances = @. max(
             circumradius * sqnd, ghost_distances + circumradius * sqnd * 1.1
         )
