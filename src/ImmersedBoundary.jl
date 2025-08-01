@@ -692,40 +692,46 @@ module ImmersedBoundary
     information regarding a single partition at a time is ported to the GPU,
     thus satisfying far tighter memory requirements.
     """
-    (dom::Domain)(
+    function (dom::Domain)(
         f, args::AbstractArray...; 
         conv_to_backend = nothing,
         conv_from_backend = nothing,
         kwargs...
-    ) = map(
-        part -> let pargs = map(
-            a -> selectdim(a, 1, part.domain) |> copy, 
-            args
-        )
-            mypart = part
-            if !isnothing(conv_to_backend)
-                pargs = map(
-                    a -> to_backend(a, conv_to_backend), pargs
-                )
-                mypart = to_backend(part, conv_to_backend)
-            end
-
-            r = f(mypart, pargs...; kwargs...)
-        
-            if !isnothing(conv_from_backend)
-                pargs = map(
-                    a -> to_backend(a, conv_from_backend), pargs
-                )
-            end
-
-            for (a, pa) in zip(args, pargs)
-                selectdim(a, 1, part.image) .= selectdim(pa, 1, part.image_in_domain)
-            end
-
-            r
-        end,
-        dom.partitions
     )
+        ret = Vector{Any}(undef, length(dom.partitions))
+        @threads for ip = 1:length(ret)
+            part = dom.partitions[ip]
+
+            ret[ip] = let pargs = map(
+                a -> selectdim(a, 1, part.domain) |> copy, 
+                args
+            )
+                mypart = part
+                if !isnothing(conv_to_backend)
+                    pargs = map(
+                        a -> to_backend(a, conv_to_backend), pargs
+                    )
+                    mypart = to_backend(part, conv_to_backend)
+                end
+
+                r = f(mypart, pargs...; kwargs...)
+            
+                if !isnothing(conv_from_backend)
+                    pargs = map(
+                        a -> to_backend(a, conv_from_backend), pargs
+                    )
+                end
+
+                for (a, pa) in zip(args, pargs)
+                    selectdim(a, 1, part.image) .= selectdim(pa, 1, part.image_in_domain)
+                end
+
+                r
+            end
+        end
+
+        ret
+    end
 
     """
     $TYPEDSIGNATURES

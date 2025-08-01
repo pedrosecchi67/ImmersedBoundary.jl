@@ -311,13 +311,25 @@ module CFD
         Pi::AbstractArray{Float64},
         Pip1::AbstractArray{Float64},
         Pip2::AbstractArray{Float64},
-        dim::Int64, fluid::Fluid
+        dim::Int64, fluid::Fluid;
+        νmin::Union{AbstractArray{Float64}, Nothing} = nothing,
+        νmin_ip1::Union{AbstractArray{Float64}, Nothing} = nothing,
     )
 
         Pim1, bsize = block2mat(Pim1)
         Pi, _ = block2mat(Pi)
         Pip1, _ = block2mat(Pip1)
         Pip2, _ = block2mat(Pip2)
+        if isnothing(νmin)
+            νmin = 0.0
+        else
+            νmin, _ = block2mat(νmin)
+        end
+        if isnothing(νmin_ip1)
+            νmin_ip1 = 0.0
+        else
+            νmin_ip1, _ = block2mat(νmin_ip1)
+        end
 
         pim1 = @view Pim1[1, :]
         p = @view Pi[1, :]
@@ -337,7 +349,8 @@ module CFD
         ϵ = sqrt(eps(eltype(p)))
         ν = @. max(
                 abs(pip1 + pim1 - 2 * p) / (abs(pip1 - p) + abs(pim1 - p) + ϵ),
-                abs(pip2 + p - 2 * pip1) / (abs(pip1 - p) + abs(pip2 - pip1) + ϵ)
+                abs(pip2 + p - 2 * pip1) / (abs(pip1 - p) + abs(pip2 - pip1) + ϵ),
+                νmin, νmin_ip1
         )
         λ = @. max(
                 abs(v) + a, abs(vip1) + aip1

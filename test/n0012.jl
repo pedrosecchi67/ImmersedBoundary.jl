@@ -42,10 +42,26 @@ for _ = 1:10
 
     let Qnew = copy(Q)
         dom(Q, P, Qnew) do part, Q, P, Qnew
-            for i = 1:2
-                Pl, Pr = ibm.MUSCL(part, P, i)
+            νmin = zeros(size(P, 1))
+            ibm.impose_bc!(
+                part, "wall", νmin
+            ) do bdry, ν
+                ones(length(ν))
+            end
 
-                Qnew .-= dt .* ibm.∇(part, ibm.CFD.HLL(Pl, Pr, i, fluid), i)
+            for i = 1:2
+                Pim1 = ibm.getalong(part, P, i, -1)
+                Pip1 = ibm.getalong(part, P, i, 1)
+                Pip2 = ibm.getalong(part, P, i, 2)
+
+                Qnew .-= dt .* ibm.∇(
+                    part, ibm.CFD.JSTKE(
+                        Pim1, P, Pip1, Pip2, i, fluid;
+                        νmin = νmin,
+                        νmin_ip1 = ibm.getalong(part, νmin, i, 1)
+                    ), 
+                    i
+                )
             end
 
             Pnew = ibm.CFD.state2primitive(fluid, Qnew)
