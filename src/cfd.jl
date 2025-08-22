@@ -12,18 +12,43 @@ module CFD
     struct Fluid
         R::Real
         γ::Real
+        k::AbstractVector
+        μref::Real
+        Tref::Real
+        S::Real
     end
 
     """
     $TYPEDSIGNATURES
 
-    Constructor for a fluid
+    Constructor for a fluid (defaults to air).
+
+    If the thermal conductivity is `k`, the thermal conductivity is considered tempterature
+    dependent as per the coefficients of a polynomial:
+
+    ```
+    k = 0.0
+    for (i, ki) in enumerate(fluid.k)
+        k += ki * T ^ (i - 1)
+    end
+    ```
+
+    The other arguments are used for Sutherland's law.
     """
     Fluid(
         ;
         R::Real = 283.0,
         γ::Real = 1.4,
-    ) = Fluid(R, γ)
+        k::Union{Real, AbstractVector} = [0.00646, 6.468e-5],
+        μref::Real = 1.716e-5,
+        Tref::Real = 273.15,
+        S::Real = 110.4,
+    ) = Fluid(
+        R, γ, (
+            k isa Real ? 
+            [k] : copy(k)
+        ), μref, Tref, S
+    )
 
     """
     $TYPEDSIGNATURES
@@ -71,6 +96,30 @@ module CFD
     speed_of_sound(fld::Fluid, T) = (
         @. sqrt(fld.γ * fld.R * clamp(T, 10.0, Inf64))
     )
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain viscosity from Sutherland's law
+    """
+    dynamic_viscosity(
+        fld::Fluid, T
+    ) = (
+        @. fld.μref * ((T / fld.Tref) ^ (2.0 / 3)) * (fld.Tref + fld.S) / (T + fld.S)
+    )
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain heat conductivity given temperature
+    """
+    function heat_conductivity(fld::Fluid, T)
+        k = @. 0.0 * T
+        for (i, ki) in enumerate(fld.k)
+            k += @. ki * T ^ (i - 1)
+        end
+        k
+    end
 
     """
     $TYPEDSIGNATURES
