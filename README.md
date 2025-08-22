@@ -321,6 +321,7 @@ For easier implementation of CFD codes, you may use the module `ImmersedBoundary
 ?ibm.CFD.speed_of_sound
 ?ibm.CFD.heat_conductivity
 ?ibm.CFD.dynamic_viscosity
+?ibm.CFD.viscous_fluxes
 ?ibm.CFD.state2primitive
 ?ibm.CFD.primitive2state
 ?ibm.CFD.rms
