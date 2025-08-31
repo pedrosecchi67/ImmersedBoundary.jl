@@ -250,10 +250,6 @@ module NNInterpolator
             dom = domain(intp)
         end
 
-        if isnothing(dom) 
-            dom = domain(intp)
-        end
-
         if dom isa AbstractVector
             dom = index_map(dom)
         end
