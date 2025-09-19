@@ -97,6 +97,8 @@ module ImmersedBoundary
         normals::AbstractMatrix{Float64}
         areas::AbstractVector{Float64}
         interpolator::Interpolator
+        offsets::AbstractVector{Float64}
+        offset_interpolator::Interpolator
     end
 
     """
@@ -108,7 +110,7 @@ module ImmersedBoundary
     triangle side is larger than the provided value.
     """
     function Surface(
-        X::AbstractMatrix{Float64}, 
+        centers::AbstractMatrix{Float64}, spacing::AbstractMatrix{Float64},
         tree::KDTree, 
         stl::Mesher.Stereolitography; max_length::Float64 = 0.0
     )
@@ -120,7 +122,7 @@ module ImmersedBoundary
         nd = size(stl.points, 1)
         points = permutedims(stl.points)
 
-        interpolator = Interpolator(X, points, tree; first_index = true)
+        interpolator = Interpolator(centers, points, tree; first_index = true)
 
         _, normals = centers_and_normals(stl)
 
@@ -142,15 +144,31 @@ module ImmersedBoundary
         )
         normals = normals ./ areas
 
+        circumdiameters = sum(spacing .^ 2; dims = 2) |> vec |> x -> sqrt.(x)
+        offsets = interpolator(circumdiameters)
+        offset_interpolator = Interpolator(points .+ normals .* offsets,
+            points, tree; first_index = true)
+
         Surface(
             deepcopy(stl),
             points,
             normals,
             areas,
-            interpolator
+            interpolator,
+            offsets, offset_interpolator
         )
 
     end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain values of field property an offset away from the surface (see vector 
+    `surf.offsets`). The first index should refer to the cell/surface index.
+    """
+    at_offset(
+        surf::Surface, u::AbstractArray
+    ) = surf.offset_interpolator(u)
 
     """
     $TYPEDSIGNATURES
@@ -534,7 +552,7 @@ module ImmersedBoundary
         surface_dict = Dict{String, Surface}()
         for (sname, stl, L) in surfaces
             surface_dict[sname] = Surface(
-                centers, tree, stl;
+                centers, spacing, tree, stl;
                 max_length = L
             )
         end
