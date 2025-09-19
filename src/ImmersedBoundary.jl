@@ -146,8 +146,8 @@ module ImmersedBoundary
 
         circumdiameters = sum(spacing .^ 2; dims = 2) |> vec |> x -> sqrt.(x)
         offsets = interpolator(circumdiameters)
-        offset_interpolator = Interpolator(points .+ normals .* offsets,
-            points, tree; first_index = true)
+        offset_interpolator = Interpolator(centers, points .+ normals .* offsets,
+            tree; first_index = true)
 
         Surface(
             deepcopy(stl),
