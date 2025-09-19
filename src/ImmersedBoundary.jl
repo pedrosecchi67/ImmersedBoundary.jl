@@ -607,7 +607,12 @@ module ImmersedBoundary
                 surf_data = Dict(
                     [
                         k => let pdims = circshift(1:ndims(v), -1) |> x -> tuple(x...)
-                            permutedims(surf(v), pdims)
+                            permutedims(
+                                (
+                                    size(v, 1) > length(surf.offsets) ?
+                                    surf(v) : v
+                                ), 
+                                pdims)
                         end for (k, v) in kwargs
                     ]...
                 )
