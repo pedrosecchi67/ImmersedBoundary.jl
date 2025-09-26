@@ -12,18 +12,43 @@ module CFD
     struct Fluid
         R::Real
         γ::Real
+        k::AbstractVector
+        μref::Real
+        Tref::Real
+        S::Real
     end
 
     """
     $TYPEDSIGNATURES
 
-    Constructor for a fluid
+    Constructor for a fluid (defaults to air).
+
+    If the thermal conductivity is `k`, the thermal conductivity is considered tempterature
+    dependent as per the coefficients of a polynomial:
+
+    ```
+    k = 0.0
+    for (i, ki) in enumerate(fluid.k)
+        k += ki * T ^ (i - 1)
+    end
+    ```
+
+    The other arguments are used for Sutherland's law.
     """
     Fluid(
         ;
         R::Real = 283.0,
         γ::Real = 1.4,
-    ) = Fluid(R, γ)
+        k::Union{Real, AbstractVector} = [0.00646, 6.468e-5],
+        μref::Real = 1.716e-5,
+        Tref::Real = 273.15,
+        S::Real = 110.4,
+    ) = Fluid(
+        R, γ, (
+            k isa Real ? 
+            [k] : copy(k)
+        ), μref, Tref, S
+    )
 
     """
     $TYPEDSIGNATURES
@@ -71,6 +96,30 @@ module CFD
     speed_of_sound(fld::Fluid, T) = (
         @. sqrt(fld.γ * fld.R * clamp(T, 10.0, Inf64))
     )
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain viscosity from Sutherland's law
+    """
+    dynamic_viscosity(
+        fld::Fluid, T
+    ) = (
+        @. fld.μref * ((T / fld.Tref) ^ (2.0 / 3)) * (fld.Tref + fld.S) / (T + fld.S)
+    )
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain heat conductivity given temperature
+    """
+    function heat_conductivity(fld::Fluid, T)
+        k = @. 0.0 * T
+        for (i, ki) in enumerate(fld.k)
+            k += @. ki * T ^ (i - 1)
+        end
+        k
+    end
 
     """
     $TYPEDSIGNATURES
@@ -367,6 +416,77 @@ module CFD
         E[dim + 2, :] .+= p
 
         (@. E + (Qi - Qip1) * (ν * λ)' / 2) |> x -> mat2block(x, bsize)
+
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain viscous and conductive fluxes given array of primitive variables,
+    fluid struct and components of the primitive variable array gradient along each axis.
+    """
+    function viscous_fluxes(P::AbstractArray, fluid::Fluid, Pgrad::AbstractArray...;
+        μt::Union{Real, AbstractArray} = 0.0)
+        
+        P, bsize = block2mat(P)
+        if μt isa AbstractArray
+            μt, _ = block2mat(μt)
+            μt = vec(μt)
+        end
+        Pgrad = [
+            block2mat(pgrad)[1] for pgrad in Pgrad
+        ]
+
+        T = @view P[2, :]
+        vels = eachrow(P)[3:end]
+        μ = dynamic_viscosity(fluid, T) .+ μt
+        k = heat_conductivity(fluid, T)
+
+        nd = length(vels)
+
+        # calculate stresses
+        velgrad = [view(Pgrad[j], i + 2, :) for i = 1:nd, j = 1:nd]
+        divu = sum(
+            i -> velgrad[i, i], 1:nd
+        )
+
+        τ = [
+            (
+                velgrad[i, j] .+ velgrad[j, i] .- (
+                    i == j ? divu .* (2.0 / 3) : 0.0
+                )
+            ) .* μ for i = 1:nd, j = 1:nd
+        ]
+
+        # calculate heat flux
+        f = [
+            pgrad[2, :] .* k for pgrad in Pgrad
+        ]
+
+        # compile along each axis
+        fluxes = AbstractArray[]
+        for i = 1:nd
+            F = similar(P)
+            F .= 0.0
+
+            F[2, :] .+= f[i] # add heat flux
+
+            # add shear contribution to energy
+            for j = 1:nd
+                F[2, :] .+= vels[j] .* τ[i, j]
+            end
+
+            # add viscous fluxes to momenta
+            for j = 1:nd
+                F[2 + j, :] .+= τ[i, j]
+            end
+
+            push!(
+                fluxes, mat2block(F, bsize)
+            )
+        end
+
+        fluxes
 
     end
 

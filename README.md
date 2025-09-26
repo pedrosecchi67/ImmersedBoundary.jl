@@ -311,6 +311,17 @@ CX, CY = ibm.surface_integral(
 )
 ```
 
+Values may also be obtained an offset away from the surface in order to obtain
+values like `τ` at the wall in wall-modelled simulations:
+
+```julia
+surf = dom.surfaces["wall"]
+
+τ = μ .* (
+    at_offset(surf, V) .- surf(V)
+) ./ surf.offsets # wall-normal gradient
+```
+
 ### CFD utilities
 
 For easier implementation of CFD codes, you may use the module `ImmersedBoundary.CFD`. Check the docstrings for the following functions:
@@ -319,6 +330,9 @@ For easier implementation of CFD codes, you may use the module `ImmersedBoundary
 ?ibm.MUSCL
 ?ibm.CFD.Fluid
 ?ibm.CFD.speed_of_sound
+?ibm.CFD.heat_conductivity
+?ibm.CFD.dynamic_viscosity
+?ibm.CFD.viscous_fluxes
 ?ibm.CFD.state2primitive
 ?ibm.CFD.primitive2state
 ?ibm.CFD.rms

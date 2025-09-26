@@ -796,7 +796,9 @@ module Mesher
 
             grid = vtk_grid(fname, points, mcells)
             for (k, v) in kwargs
-                grid[String(k)] = v
+                if size(v, ndims(v)) == length(mcells)
+                    grid[String(k)] = v
+                end
             end
 
             grid
