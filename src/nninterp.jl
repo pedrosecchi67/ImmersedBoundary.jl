@@ -130,7 +130,7 @@ module NNInterpolator
         Qnew = similar(Q, eltype(Q), intp.n_outputs)
 
         if length(intp.fetch_to) > 0
-            Qnew[intp.fetch_to] .= Q[intp.fetch_from]
+            view(Qnew, intp.fetch_to) .= view(Q, intp.fetch_from)
         end
 
         if length(intp.interpolate_to) > 0
@@ -147,6 +147,41 @@ module NNInterpolator
     end
 
     """
+        ```
+        function soft_mapslices(
+            f, A::AbstractArray; dims::Int
+        )
+        ```
+
+    Function to run mapslices in a non-allocating way by running `f`
+    on all slices of `A` along dimension `dims`.
+    """
+    function soft_mapslices(
+        f, A::AbstractArray; dims::Int
+    )
+        sliceinds = setdiff(1:ndims(A), dims) |> x -> tuple(x...)
+
+        R = nothing
+        Rslices = nothing
+        for (i, aslice) in eachslice(A; dims = sliceinds) |> enumerate
+            r = f(aslice)
+
+            if isnothing(R)
+                s = size(A) |> collect
+                s[dims] = length(r)
+
+                R = similar(A, s...)
+                Rslices = eachslice(R; dims = sliceinds)
+            end
+
+            rslice = Rslices[i]
+            rslice .= r
+        end
+
+        R
+    end
+
+    """
     $TYPEDSIGNATURES
 
     Interpolate multi-dimensional array.
@@ -156,8 +191,14 @@ module NNInterpolator
     the first dimension is interpreted as the point index upon interpolation.
     Otherwise, the last dimension is interpreted as the point index (default).
     """
-    (intp::Interpolator)(Q::AbstractArray) = mapslices(
-        intp, Q; dims = (intp.first_index ? 1 : ndims(Q))
+    (intp::Interpolator)(Q::AbstractArray) = (
+        Q isa Array ? # raw Julia array
+        mapslices(
+            intp, Q; dims = (intp.first_index ? 1 : ndims(Q))
+        ) : 
+        soft_mapslices(
+            intp, Q; dims = (intp.first_index ? 1 : ndims(Q))
+        )
     )
 
     """
