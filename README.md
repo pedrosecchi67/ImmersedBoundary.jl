@@ -74,6 +74,7 @@ function Domain(
         max_partition_cells::Int64 = 1000_000,
         families = nothing,
         stencil_points = Tuple[],
+        initial_splits = nothing,
 )
 ```
 
@@ -108,7 +109,7 @@ Generate an octree mesh defined by:
 * A maximum number of cells per partition;
 * A set of families defining surface groups for postprocessing, BC imposition and wall
     distance calculations; and
-* An optional tuple specifying the number of "splits" conducted along each axis
+* An optional tuple specifying the number of initial "splits" conducted along each axis
     before octree splitting. For example, if one has `origin = [1.0, 1.0]`,
     `widths = [2.0, 3.0]`, one may use `initial_splits = (2, 3)` to maintain isotropy.
 
