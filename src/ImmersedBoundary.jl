@@ -285,7 +285,10 @@ module ImmersedBoundary
         distance functions are approximated; 
     * A maximum number of cells per partition;
     * A set of families defining surface groups for postprocessing, BC imposition and wall
-        distance calculations.
+        distance calculations; and
+    * An optional tuple specifying the number of "splits" conducted along each axis
+        before octree splitting. For example, if one has `origin = [1.0, 1.0]`,
+        `widths = [2.0, 3.0]`, one may use `initial_splits = (2, 3)` to maintain isotropy.
 
     The families may be defined with the following syntax:
 
@@ -328,6 +331,7 @@ module ImmersedBoundary
     function Domain(
             origin::Vector{Float64}, widths::Vector{Float64},
             surfaces::Tuple{String, Stereolitography, Float64}...;
+            initial_splits = nothing,
             refinement_regions::AbstractVector = [],
             max_length::Float64 = Inf,
             growth_ratio::Float64 = 1.1,
@@ -403,6 +407,7 @@ module ImmersedBoundary
         msh = mshr.FixedMesh(
             origin, widths,
             surfaces...;
+            initial_splits = initial_splits,
             growth_ratio = growth_ratio,
             refinement_regions = refinement_regions,
             max_length = max_length,

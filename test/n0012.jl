@@ -12,8 +12,9 @@ tri = ibm.Triangulation(
 L = 20.0
 
 dom = ibm.Domain(
-    [-L/2, -L/2], [L, L],
+    [-L/2, -L/2], [2L, L],
     ("wall", stl, 0.01);
+    initial_splits = (4, 2),
     refinement_regions = [
         tri => 0.0025,
     ],

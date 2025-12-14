@@ -547,6 +547,34 @@ module Mesher
 
         """
         $TYPEDSIGNATURES
+
+        Split hypercube as per tuple with one integer per dimension.
+        Returns tuples of origin and width vectors for cut hypercubes
+        """
+        function split_hypercube(
+            origin::AbstractVector, widths::AbstractVector,
+            splits::Int...
+        )
+            splits = collect(splits)
+
+            ws = widths ./ splits
+            corners = [
+                collect(
+                    LinRange(
+                        origin[i], origin[i] + widths[i], s + 1
+                    )[1:(end - 1)]
+                ) for (i, s) in enumerate(splits)
+            ]
+
+            [
+                (
+                    collect(os), ws
+                ) for os in Iterators.product(corners...)
+            ]
+        end
+
+        """
+        $TYPEDSIGNATURES
         
         Generate an octree/quadtree mesh described by:
 
@@ -575,7 +603,10 @@ module Mesher
         * An approximation ratio between wall distance and cell circumradius past which
             distance functions are approximated;
         * A number of recursive refinement levels past which the triangles in the provided
-            triangulations are filtered to lighter, local topologies.
+            triangulations are filtered to lighter, local topologies; and
+        * An optional tuple specifying the number of "splits" conducted along each axis
+            before octree splitting. For example, if one has `origin = [1.0, 1.0]`,
+            `widths = [2.0, 3.0]`, one may use `initial_splits = (2, 3)` to maintain isotropy.
 
         Farfield boundaries may be defined with the following syntax:
 
@@ -604,6 +635,7 @@ module Mesher
                 filter_triangles_every::Int64 = 0,
                 verbose::Bool = false,
                 farfield_boundaries = nothing,
+                initial_splits = nothing,
                 _mgrid_depth::Int64 = 0
         )
             bnames = map(p -> p[1], surfaces) |> collect
@@ -629,14 +661,25 @@ module Mesher
                 bdries
             )
 
-            center = origin .+ widths ./ 2
-            projs = map(
-                ref -> Projection(ref, center), trirefs
-            )
+            origins_and_widths = [
+                (origin, widths)
+            ]
+            if !isnothing(initial_splits)
+                origins_and_widths = split_hypercube(
+                    origin, widths, initial_splits...
+                )
+            end
 
             args = [
                 (
-                    Cell(origin, widths, projs),
+                    Cell(
+                        os, ws, 
+                        let center = os .+ ws ./ 2
+                            map(
+                                ref -> Projection(ref, center), trirefs
+                            )
+                        end
+                    ),
                     trirefs, bdry_lengths,
                     refs, ref_lengths,
                                     growth_ratio,
@@ -646,7 +689,7 @@ module Mesher
                                     approximation_ratio,
                                     filter_triangles_every,
                                     _mgrid_depth,
-                )
+                ) for (os, ws) in origins_and_widths
             ]
 
             if verbose

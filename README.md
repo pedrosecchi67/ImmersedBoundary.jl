@@ -107,7 +107,10 @@ Generate an octree mesh defined by:
     distance functions are approximated; 
 * A maximum number of cells per partition;
 * A set of families defining surface groups for postprocessing, BC imposition and wall
-    distance calculations.
+    distance calculations; and
+* An optional tuple specifying the number of "splits" conducted along each axis
+    before octree splitting. For example, if one has `origin = [1.0, 1.0]`,
+    `widths = [2.0, 3.0]`, one may use `initial_splits = (2, 3)` to maintain isotropy.
 
 The families may be defined with the following syntax:
 
