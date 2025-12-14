@@ -1169,4 +1169,7 @@ module ImmersedBoundary
         hcat(prims...)
     end
 
+    include("LES.jl")
+    using .LES
+
 end
