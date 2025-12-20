@@ -1102,7 +1102,7 @@ module ImmersedBoundary
                 @. V = sqrt(V)
 
                 ϵ = eps(Float64)
-                dV!dn = du!dn(bdry, V, P, args...; kwargs...)
+                dV!dn = du!dn(bdry, V, P, args...; fluid = fluid, kwargs...)
                 Vratio = @. (V - dV!dn * bdry.image_distances) / (V + ϵ)
 
                 for i = 1:nd
