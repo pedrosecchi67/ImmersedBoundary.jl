@@ -1,4 +1,4 @@
-module LES
+module Turbulence
 
     using ..LinearAlgebra
     using ..DocStringExtensions
@@ -123,4 +123,4 @@ module LES
         @. Cₛ * Δ ^ 2 * sqrt(2 * SijSij)
     end
 
-end # module LES
+end # module Turbulence

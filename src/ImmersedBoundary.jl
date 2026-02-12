@@ -1169,7 +1169,7 @@ module ImmersedBoundary
         hcat(prims...)
     end
 
-    include("LES.jl")
-    using .LES
+    include("turbulence.jl")
+    using .Turbulence
 
 end

@@ -355,10 +355,10 @@ For easier implementation of CFD codes, you may use the module `ImmersedBoundary
 ?CFD.clip_CFL!
 ```
 
-Some implementations for wall functions and LES models may also be found at `ImmersedBoundary.LES`:
+Some implementations for wall functions and turbulence models may also be found at `ImmersedBoundary.Turbulence`:
 
 ```julia
-?ibm.LES.resolve_LOTW
-?ibm.LES.Von_Karman
-?ibm.LES.Smagorinsky_νₜ
+?ibm.Turbulence.resolve_LOTW
+?ibm.Turbulence.Von_Karman
+?ibm.Turbulence.Smagorinsky_νₜ
 ```
