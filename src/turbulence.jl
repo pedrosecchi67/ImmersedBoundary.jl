@@ -4,46 +4,6 @@ module Turbulence
     using ..DocStringExtensions
 
     """
-    Secant method implementation
-    """
-    function secant(f, x1, x2, n_iter::Int = 20)
-        f1 = f(x1)
-        f2 = f(x2)
-        h = eps(eltype(f1))
-
-        xsolve = @. (
-            abs(f1) * x2 + abs(f2) * x1
-        ) / (abs(f1) + abs(f2) + h)
-        fsolve = f(xsolve)
-
-        for nit = 1:n_iter
-            if x1 isa AbstractArray
-                isfirst = @. fsolve * f2 < fsolve * f1
-
-                @. x1 = x1 * (1.0 - isfirst) + xsolve * isfirst
-                @. x2 = x2 * isfirst + xsolve * (1.0 - isfirst)
-
-                xsolve = @. (
-                    abs(f1) * x2 + abs(f2) * x1
-                ) / (abs(f1) + abs(f2) + h)
-                fsolve .= f(xsolve)
-            else
-                isfirst = fsolve * f2 < fsolve * f1
-
-                x1 = x1 * (1.0 - isfirst) + xsolve * isfirst
-                x2 = x2 * isfirst + xsolve * (1.0 - isfirst)
-
-                xsolve = (
-                    abs(f1) * x2 + abs(f2) * x1
-                ) / (abs(f1) + abs(f2) + h)
-                fsolve = f(xsolve)
-            end
-        end
-
-        xsolve
-    end
-
-    """
     $TYPEDSIGNATURES
 
     Obtain `y⁺` given a law of the wall (`u⁺(y⁺)`),
@@ -54,20 +14,35 @@ module Turbulence
         law, ν, y, u; 
         range::Tuple = (0.2, 300.0),
         n_iter::Int = 20,
+        ω::Real = 0.5,
     )
-        f = y⁺ -> let u⁺ = law.(y⁺)
-            uτ = @. u / u⁺
-            @. uτ * y / ν - y⁺
+        Rey = @. y * u / ν
+        ypmin, ypmax = range
+
+        y⁺ = nothing
+        if u isa AbstractArray
+            y⁺ = similar(y)
+            y⁺ .= ypmax
+
+            for _ = 1:n_iter
+                @. y⁺ = y⁺ + (
+                    clamp(
+                        Rey / law(y⁺), ypmin, ypmax
+                    ) - y⁺
+                ) * ω
+            end
+        else
+            y⁺ = ypmax
+
+            for _ = 1:n_iter
+                y⁺ = y⁺ + (
+                    clamp(
+                        Rey / law(y⁺), ypmin, ypmax
+                    ) - y⁺
+                ) * ω
+            end
         end
 
-        x1 = similar(u)
-        x1 .= range[1]
-        x2 = similar(u)
-        x2 .= range[2]
-
-        y⁺ = secant(
-            f, x1, x2, n_iter
-        )
         u⁺ = law.(y⁺)
         uτ = @. u / u⁺
 
