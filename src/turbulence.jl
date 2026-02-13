@@ -21,7 +21,7 @@ module Turbulence
 
         y⁺ = nothing
         if u isa AbstractArray
-            y⁺ = similar(y)
+            y⁺ = similar(u)
             y⁺ .= ypmax
 
             for _ = 1:n_iter
