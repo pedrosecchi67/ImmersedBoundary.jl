@@ -26,10 +26,10 @@ Stereolitography objects can be used to describe surfaces:
 import ImmersedBoundary as ibm
 
 # binary or ASCII:
-sphere = ibm.Stereolitography("sphere.stl")
+sphere = Stereolitography("sphere.stl")
 
 # Selig format .dat file with no header:
-airfoil = ibm.Stereolitography("rae2822.dat")
+airfoil = Stereolitography("rae2822.dat")
 
 circle = let theta = LinRange(0.0, 2pi, 100) |> collect
     points = [
@@ -37,7 +37,7 @@ circle = let theta = LinRange(0.0, 2pi, 100) |> collect
         sin.(theta)'
     ]
 
-    ibm.Stereolitography(points; closed = true)
+    Stereolitography(points; closed = true)
 end
 
 # same, but with defined simplex corner indices:
@@ -51,34 +51,47 @@ circle = let theta = LinRange(0.0, 2pi, 100) |> collect
         circshift(collect(1:length(theta)), -1)'
     ]
 
-    ibm.Stereolitography(points, indices)
+    Stereolitography(points, indices)
 end
 
 # concatenate two STLs:
 stl = cat(circle, airfoil)
+
+# refine STL object to a given max. length via tet splitting:
+stl = refine_to_length(stl, 0.001)
+
+# merge points in one or more STL:
+stl = merge_points(stl1, stl2; tolerance = 1e-5)
 ```
 
-### Mesh/domain definition
+# Mesh generation
 
 ```julia
-function Domain(
-        origin::Vector{Float64}, widths::Vector{Float64},
-        surfaces::Tuple{String, Stereolitography, Float64}...;
-        refinement_regions::AbstractVector = [],
-        max_length::Float64 = Inf,
-        growth_ratio::Float64 = 1.1,
-        ghost_layer_ratio::Tuple = (-1.1, 2.1),
-        interior_point = nothing,
-        approximation_ratio::Float64 = 2.0,
-        verbose::Bool = false,
-        max_partition_cells::Int64 = 1000_000,
-        families = nothing,
-        stencil_points = Tuple[],
-        initial_splits = nothing,
+struct Mesh
+    origins::Matrix{Float64} # (ndims, ncells)
+    widths::Matrix{Float64}
+    centers::Matrix{Float64}
+    in_domain::Vector{Bool}
+    family_distances::Dict{String, Vector{Float64}}
+    family_projections::Dict{String, Matrix{Float64}}
+    families::Dict{String, Stereolitography}
+end
+
+function Mesh(
+    origin::Vector{Float64}, widths::Vector{Float64},
+    surfaces::Tuple{String, Stereolitography, Float64}...;
+    interior_reference::Union{Vector{Float64}, Nothing} = nothing,
+    boundary_surface::Union{Stereolitography, Nothing} = nothing,
+    growth_ratio::Float64 = 1.1,
+    ghost_layer_ratio::Float64 = 1.5,
+    refinement_regions = [],
+    hypercube_families = [],
+    merge_tolerance::Real = 1e-7,
+    verbose::Bool = false,
 )
 ```
 
-Generate an octree mesh defined by:
+Generate an octree/quadtree mesh described by:
 
 * A hypercube origin;
 * A vector of hypercube widths;
@@ -87,180 +100,203 @@ Generate an octree mesh defined by:
     the max. cell widths at these surfaces;
 * A set of refinement regions described by distance functions and
     the local refinement at each region. Example:
-        ```julia
-        refinement_regions = [
-            ibm.Ball([0.0, 0.0], 0.1) => 0.005,
-            ibm.Ball([1.0, 0.0], 0.1) => 0.005,
-            ibm.Box([-1.0, -1.0], [3.0, 2.0]) => 0.0025,
-            ibm.Line([1.0, 0.0], [2.0, 0.0]) => 0.005,
-            ibm.Triangulation(
-                ibm.feature_edges(stl;
-                    angle = 10.0, radius = 0.05) # detects feature edges in solids
-            ) => 0.001
-        ]
-        ```
-* A maximum cell size (optional);
-* A volumetric growth ratio;
-* An interval of ratios between the cell circumradius and the SDF of a given surface for 
-    which cells are defined as ghosts;
-* A point reference within the domain. If absent, external flow is assumed;
-* An approximation ratio between wall distance and cell circumradius past which
-    distance functions are approximated; 
-* A maximum number of cells per partition;
-* A set of families defining surface groups for postprocessing, BC imposition and wall
-    distance calculations; and
-* An optional tuple specifying the number of initial "splits" conducted along each axis
-    before octree splitting. For example, if one has `origin = [1.0, 1.0]`,
-    `widths = [2.0, 3.0]`, one may use `initial_splits = (2, 3)` to maintain isotropy.
+    ```julia
+    refinement_regions = [
+        Mesher.Ball([0.0, 0.0], 0.1) => 0.005,
+        Mesher.Ball([1.0, 0.0], 0.1) => 0.005,
+        Mesher.Box([-1.0, -1.0], [3.0, 2.0]) => 0.0025,
+        Mesher.Line([1.0, 0.0], [2.0, 0.0]) => 0.005
+    ]
+    ```
+* A cell growth ratio;
+* An interior point reference, and, along with it, a boundary surface
+    for domain clipping; and
+* A ghost layer ratio, which defines the thickness of the ghost cell layer
+    within a solid as a ratio of the local cell circumdiameter.
 
-The families may be defined with the following syntax:
+Family naming may be implemented by giving the same name string to several surfaces.
+Surfaces without family names ("", empty strings) will be considered merely
+a meshing resource, not a boundary.
+
+Hypercube boundary family names may be specified by:
 
 ```julia
-surfaces = [
-    ("wing", "wing.stl", 1e-3),
-    ("flap", "flap.stl", 1e-3)
-]
-families = [
-    "wall" => ["wing", "flap"], # a group of surface names
+hypercube_families = [
     "inlet" => [
-        (1, false), # fwd face, first dimension (x)
-        (2, false), # left face, second dimension (y)
-        (2, true), # right face, second dimension (y)
-        (3, false), # bottom face, third dimension (z)
-        (3, true), # top face, third dimension (z)
+        (1, false), # back face, x axis
+        (2, true), # front face, y axis
+        (3, false), # bottom face, z axis
+        (3, true) # top face, z axis
     ],
-    "outlet" => [(1, true)]
-]
-
-dom = ibm.Domain(origin, widths, surfaces...; families = families)
-```
-
-The default family definition uses each surface as a family and defines
-the farfield as `"FARFIELD"`.
-
-Stencil points may be specified as tuples. An example for first order operations
-on a 3D mesh is:
-
-```julia
-stencil_points = [
-    (-1, 0, 0), (0, 0, 0), (1, 0, 0),
-    (0, -1, 0), (0, 0, 0), (0, 1, 0), # don't worry about duplicate values
-    (0, 0, -1), (0, 0, 0), (0, 0, 1)
+    "symmetry" => [
+        (2, false) # left face, y axis
+    ],
+    "outlet" => [
+        (1, true) # front face, x axis
+    ]
 ]
 ```
 
-The default is a cruciform, second-order CFD stencil.
-
-Meshes can be saved to binary (serialized) files:
+# Domain definition 
 
 ```julia
-ibm.save_domain("domain.ibm", dom)
-dom = ibm.load_domain("domain.ibm")
+function Domain(
+    msh::Mesh;
+    stencil = nothing,
+    max_partition_size::Int = 1000_000,
+    ghost_layer_ratio::Real = 1.5,
+)
 ```
 
-Or used to build VTK output:
+Constructor for a domain.
+
+`ghost_layer_ratio` is the ratio between image point distances to the wall and the
+ghost cells' circumradiameters.
+
+Example:
 
 ```julia
-u = rand(length(dom)) 
-v = rand(length(dom), 2) 
+dom = Domain(msh)
 
-ibm.export_vtk("results", dom; 
-    include_volume = true, include_surface = true,
-    u = u, v = v)
+export_vtk("domain", dom) # check it out :)
+
+@show ndims(dom) # dimensionality
+@show length(dom) # number of cells
 ```
 
-Arrays can be passed as kwargs to record cell data. The first dimension is assumed to refer to the cell index.
+# Calculating residuals
 
-### Partitioned residual computing
+```julia
+(dom::Domain)(
+    f, args::AbstractArray...; 
+    n_threads::Int = 1,
+    kwargs...
+)
+```
 
-ImmersedBoundary.jl implements mesh paritioning to ensure that only a bunch of blocks in the building-cubes mesh has its residuals evaluated concurrently, thus saving on the amount of RAM used at any given time. This also allows for easier GPU parallelization, which involves tighter memory limits.
+Run a loop over the partitions of a domain and
+execute operations.
 
-The following example is given:
+Example:
 
 ```julia
 domain(r, u) do partition, rdom, udom
-    # udom includes the parts of array `u`
+    # udom includes the parts of vector `u`
     # which affect the residual at partition `partition`.
 
     # now do some Cartesian grid operations and
-    # update rdom in-place
+    # update rdom
 end
 
 # after the loop, the values of `rdom` are returned to
-# array `r`, in-place.
+# array `r`
 ```
 
-It's also an option to automatically convert the passed arrays and partition info to a given array backend (e.g. `CuArray`) to perform the residual calculations:
+This allows for large operations on field data
+to be performed one partition at a time,
+saving on max. memory usage.
+
+Return values are also stored in a vector, which is
+then returned.
+Kwargs are passed to the called function.
+
+Ran with `n_threads` treads.
+
+# Grid operators
 
 ```julia
-dom(
-    u;
-    conv_to_backend = x -> CuArray(x),
-    conv_from_backend = x -> Array(x)
-) do part, udom
-    @show typeof(udom) # CuArray
-end
-```
-
-The return values of each function call are also gathered and returned in a vector.
-
-### PDE discretization
-
-Cartesian grid operations can be done with `(part::Partition)()` and `ibm.getalong` acting over partition arrays:
-
-```julia
-
 u = rand(length(domain))
 ux = similar(u)
 
-domain(u, ux) do part, u, ux # u, ux for local domain cells only
-    # in a 3D mesh:
-    dx, dy, dz = part.spacing |> eachcol
+domain(u, ux) do part, u, ux # values at local domain
+    dx, dy = part.spacing |> eachcol
+    # we have the very similar part.centers too ;)
 
-    ux .= (
-        part(u, 1, 0, 0) .- part(u, -1, 0, 0)
+    ux .= ( # note that we're editing in-place
+        part(u, 1, 0) .- part(u, -1, 0)
     ) ./ (2 .* dx)
-
-    # or simply:
-    ux .= ibm.δ(part, u, 1)
 end
 
 # ux is now the first, x-axis derivative of u
 ```
 
-Other functions include:
+The remaining fields of `Partition` include:
 
 ```julia
-ibm.∇ # backward derivative
-ibm.Δ # forward derivative
-ibm.δ # central derivative
-ibm.μ # face averages
-ibm.MUSCL # MUSCL reconstruction
+struct Partition
+    index::Int64
+    image::AbstractVector{Int64}
+    image_in_domain::AbstractVector{Int64}
+    skirt_indices::AbstractVector{Int64}
+    domain::AbstractVector{Int64}
+    stencils::AbstractDict
+    centers::AbstractMatrix{Float64} # (ncells, ndims)
+    spacing::AbstractMatrix{Float64} # (ncells, ndims)
+    boundaries::Dict{String, Boundary}
+end
 ```
 
-### Boundary conditions
+```julia
+getalong(
+    part::Partition, 
+    U::AbstractArray, 
+    dim::Int, i::Int
+)
+```
 
-BC imposition is performed via ghost cells (check the documentation for further info), each having an image point on the opposite side of the boundary. An example of BC imposition is the following implementation of the non-penetration condition:
+Obtain stencil index `i` along dimension `dim` in a partition array.
+`part(u, 0, 3, 0)` is equivalent to `ibm.getalong(part, u, 2, 3)`, for example.
+
+We also provide the following operators and utilities (check their docstrings!):
 
 ```julia
-dom(u, v) do part, u, v
-    ibm.impose_bc!(part, "wall", u, v) do bdry, uimage, vimage
+∇
+Δ
+δ
+μ
+MUSCL
+laplacian_smoothing
+stencil_average
+advection
+dissipation
+```
+
+# Boundary conditions
+
+```julia
+function impose_bc!(
+    f,
+    part::Partition, bname::String,
+    args::AbstractArray{Float64}...;
+    impose_at_ghost::Bool = false,
+    kwargs...
+)
+```
+
+Impose boundary condition on domain array.
+
+Example for non-penetration condition:
+
+```julia
+dom(u, v) do part, udom, vdom
+    # function receives values of field properties at image points
+    # and returns their values at the boundary
+    ibm.impose_bc!(part, "wall", udom, vdom) do bdry, uimage, vimage
         nx, ny = bdry.normals |> eachcol
         un = @. nx * uimage + ny * vimage
 
-        ( # returns values at boundary given values at image point
+        (
             uimage .- un .* nx,
-            vimage .- vn .* ny
+            vimage .- un .* ny
         )
     end
 end
 
-
 # alternative return value:
 uv = zeros(length(dom), 2)
 uv[:, 1] .= 1.0
-dom(uv) do part, uv
-    ibm.impose_bc!(part, "wall", uv) do bdry, uvim
+dom(uv) do part, uvdom
+    ibm.impose_bc!(part, "wall", uvdom) do bdry, uvim
         uimage, vimage = eachcol(uvim)
         nx, ny = eachcol(bdry.normals)
         un = @. nx * uimage + ny * vimage
@@ -270,95 +306,65 @@ dom(uv) do part, uv
 end
 ```
 
-The `Boundary` type struct also includes the following fields:
+Kwargs are passed directly to the BC function.
+Note that other field variable args. may be passed
+as auxiliary variables (e. g. the BC function may receive
+3 arrays as an input, and return BCs solely for the first two).
+
+We may directly return ghost cell values rather than boundary values
+by activating flag `impose_at_ghost`.
 
 ```julia
-bdry.points # shape (nghosts, ndim): boundary projections of ghost cells
-bdry.normals # shape (nghosts, ndim)
-bdry.image_distances # to wall
-bdry.ghost_distances # to wall
-```
-
-Note that other field variable arrays may be passed to `impose_bc!`, and only the first input arrays will have their values altered as per the returned boundary values. Example:
-
-```julia
-dom(u, v) do part, u, v
-    ibm.impose_bc!(part, "boundary", u, v, w) do bdry, ui, vi, wi
-        # Neumann, du!dn = 2v
-        ubdry = ui .- vi .* 2.0 .* bdry.image_distances
-        vbdry = vi .+ wi # arbitrary
-
-        (ubdry, vbdry)
-    end
+struct Boundary
+    points::AbstractMatrix{Float64} # (npoints, ndims)
+    normals::AbstractMatrix{Float64} # (npoints, ndims)
+    ghost_indices::AbstractVector{Int64}
+    ghost_distances::AbstractVector{Float64}
+    image_distances::AbstractVector{Float64}
+    image_interpolator::NNInterpolator.Accumulator
 end
 ```
 
-### Wall distances
+# CFD utilities
 
-Wall distances for family `"wall"` may be accessed with:
+Check out the docstrings for the following functions and structs:
 
 ```julia
-signed_distance = dom.boundary_distances["wall"]
+using ImmersedBoundary.CFD
+
+Fluid
+speed_of_sound
+dynamic_viscosity
+heat_conductivity
+primitive2state
+state2primitive
+FlowBC
+ISA_atmosphere
+streamwise_direction
+pressure_coefficient
+inviscid_fluxes
+viscous_fluxes
+Reynolds_number
+adjust_Reynolds
+
+using ImmersedBoundary.Turbulence
+
+WallFunction
 ```
 
-### Surfaces and postprocessing
-
-Surfaces may be used for postprocessing and coefficient integration. Example:
+# Custom array backends/GPUs
 
 ```julia
-surf = dom.surfaces["wall"]
+dom(part, Q) do part, Q
+    # port partition to array backend
+    cpart = to_backend(part, x -> CuArray(x))
+    cQ = cu(Q)
 
-Cp_wall = surf(Cp) # interpolate array of field properties to wall
+    # run ops. on GPU
 
-CX, CY = ibm.surface_integral(
-    surf, Cp_wall .* surf.normals
-)
-```
+    Q .= Array(cQ)
+end
 
-Values may also be obtained an offset away from the surface in order to obtain
-values like `τ` at the wall in wall-modelled simulations:
-
-```julia
-surf = dom.surfaces["wall"]
-
-τ = μ .* (
-    at_offset(surf, V) .- surf(V)
-) ./ surf.offsets # wall-normal gradient
-```
-
-### CFD utilities
-
-For easier implementation of CFD codes, you may use the module `ImmersedBoundary.CFD`. Check the docstrings for the following functions:
-
-```julia
-?ibm.MUSCL
-?ibm.CFD.Fluid
-?ibm.CFD.speed_of_sound
-?ibm.CFD.heat_conductivity
-?ibm.CFD.dynamic_viscosity
-?ibm.CFD.viscous_fluxes
-?ibm.CFD.state2primitive
-?ibm.CFD.primitive2state
-?ibm.CFD.rms
-?ibm.CFD.HLL
-?ibm.CFD.AUSM
-?ibm.CFD.JSTKE
-?ibm.CFD.pressure_coefficient
-?ibm.CFD.Freestream
-?ibm.CFD.initial_guess
-?ibm.CFD.rotate_and_rescale!
-?CFD.timescale
-?CFD.wall_bc
-?CFD.freestream_bc
-?CFD.ConvergenceCriteria
-?CFD.CTUCounter
-?CFD.clip_CFL!
-```
-
-Some implementations for wall functions and turbulence models may also be found at `ImmersedBoundary.Turbulence`:
-
-```julia
-?ibm.Turbulence.resolve_LOTW
-?ibm.Turbulence.Von_Karman
-?ibm.Turbulence.Smagorinsky_νₜ
+# or, if your GPU supports the whole domain:
+cdom = to_backend(dom, x -> CuArray(x))
 ```

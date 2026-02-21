@@ -1,101 +1,181 @@
 module Turbulence
 
-    using ..LinearAlgebra
-    using ..DocStringExtensions
+    using DocStringExtensions
+
+    """
+    Function for a vectorized binary search.
+
+    Looks for the index of the last element in `u`
+    which is smaller than an entry in vector of query points `q`
+    """
+    function vector_binary_search(
+        q::AbstractVector, u::AbstractVector
+    )
+        i1 = ones(Int64, length(q))
+        i2 = fill(length(u), length(q))
+        complete = falses(length(q))
+
+        im = similar(i1)
+        while !all(complete)
+            @. im = (i1 + i2) ÷ 2
+            um = view(u, im)
+
+            @. i1 = (um < q) * im + (um >= q) * i1
+            @. i2 = (um < q) * i2 + (um >= q) * im
+
+            @. complete = complete || (i2 <= i1 + 1)
+        end
+
+        i1
+    end
+
+    """
+    Linear interpolation
+    """
+    function linear_interpolation(
+        xquery::AbstractVector, x::AbstractVector, y::AbstractVector
+    )
+        i = vector_binary_search(xquery, x)
+        inxt = i .+ 1
+
+        xl = @view x[i]
+        xn = @view x[inxt]
+        yl = @view y[i]
+        yn = @view y[inxt]
+
+        @. yl + (yn - yl) * (xquery - xl) / (xn - xl)
+    end
+
+    export WallFunction
+
+    """
+    $TYPEDFIELDS
+
+    Struct to hold wall function definitions
+    """
+    struct WallFunction
+        log10Rey::AbstractVector
+        log10y⁺::AbstractVector
+        κ::Float64
+        A::Float64
+        β::Float64
+        βstar::Float64
+        D::Float64
+        A⁺::Float64
+    end
 
     """
     $TYPEDSIGNATURES
 
-    Obtain `y⁺` given a law of the wall (`u⁺(y⁺)`),
-    local dynamic viscosity at the wall, a wall distance and an
-    external velocity. Also returns u⁺, uτ and νt
+    Constructor for a wall function.
+
+    Uses Wilcox's expressions for near-wall `k⁺`,
+    and Nezu and Nakagawa's expressions for it in the log-law region.
+    Van Driest's approximation for `μ⁺` is used via differential equations
+    to calculate an interpolated solution for `y⁺`.
     """
-    function resolve_LOTW(
-        law, ν, y, u; 
-        range::Tuple = (0.2, 300.0),
-        n_iter::Int = 20,
-        ω::Real = 0.5,
+    function WallFunction(
+        ; 
+        h0::Float64 = 0.01, 
+        growth_ratio::Float64 = 1.05,
+        y⁺_max::Float64 = 30000.0,
+        constant_layer_y⁺::Float64 = 15.0,
+        κ::Float64 = 0.41, A::Float64 = 19.0,
+        β::Float64 = 0.075, βstar::Float64 = 0.09,
+        D::Float64 = 4.2, A⁺::Float64 = 360.0,
     )
-        Rey = @. y * u / ν
-        ypmin, ypmax = range
+        h = h0
 
-        y⁺ = nothing
-        if u isa AbstractArray
-            y⁺ = similar(u)
-            y⁺ .= ypmax
+        ϵ = eps(Float64) |> sqrt
+        yps = [ϵ, h]
+        ups = [ϵ, h]
 
-            for _ = 1:n_iter
-                @. y⁺ = y⁺ + (
-                    clamp(
-                        Rey / law(y⁺), ypmin, ypmax
-                    ) - y⁺
-                ) * ω
-            end
-        else
-            y⁺ = ypmax
+        while yps[end] < y⁺_max
+            yp = yps[end]
+            μ⁺ = κ * yp * (1.0 - exp(- yp / A)) ^ 2
 
-            for _ = 1:n_iter
-                y⁺ = y⁺ + (
-                    clamp(
-                        Rey / law(y⁺), ypmin, ypmax
-                    ) - y⁺
-                ) * ω
+            push!(
+                yps, yp + h
+            )
+            push!(
+                ups, ups[end] + h / (μ⁺ + 1.0)
+            )
+
+            if yp > constant_layer_y⁺
+                h *= growth_ratio
             end
         end
 
-        u⁺ = law.(y⁺)
-        uτ = @. u / u⁺
+        Rey = @. ups * yps
 
-        νt = @. (
-            0.41 * uτ * y * (1.0 - exp(- y⁺ / 19.0)) ^ 2
+        WallFunction(
+            log10.(Rey),
+            log10.(yps),
+            κ, A, β, βstar, D, A⁺
+        )
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain named tuple with `y⁺, u⁺, μ⁺, k⁺` given a set of `Rey` values 
+    (Reynolds number in respect to local, laminar viscosity and the `y` 
+    position of the first cell center).
+    """
+    function (wf::WallFunction)(Rey::AbstractVector)
+        ϵ = eps(Float64)
+        Rey = @. clamp(abs(Rey), ϵ, Inf64)
+
+        # interpolated from previous diff. equation solution
+        y⁺ = 10.0 .^ linear_interpolation(
+            log10.(Rey), wf.log10Rey, wf.log10y⁺
+        )
+        
+        u⁺ = Rey ./ y⁺
+
+        # from van Driest
+        μ⁺ = @. wf.κ * y⁺ * (1.0 - exp(- y⁺ / wf.A)) ^ 2
+
+        # from Nakagawa-Nezu
+        k⁺ = @. min(
+            y⁺ ^ 2 / (6.0 * wf.βstar / wf.β - 2.0),
+            wf.D * exp(
+                - y⁺ / wf.A⁺
+            )
         )
 
-        (y⁺, u⁺, uτ, νt)
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Von-Karman Law of the Wall
-    """
-    function Von_Karman(y⁺::Real)
-        if y⁺ < 1.0
-            return y⁺
-        end
-
-        min(
-            5.6 * log10(y⁺) + 4.9, y⁺
+        (
+            y⁺ = y⁺, 
+            u⁺ = u⁺, 
+            μ⁺ = μ⁺,
+            k⁺ = k⁺,
         )
     end
 
     """
     $TYPEDSIGNATURES
 
-    Obtain eddy viscosity as per Smagorinsky's turbulence model.
-    Receives grid size `Δ` as an input.
-
-    The velocity gradients should be specified in a matrix of arrays,
-    such that `velocity_gradient[i, j]` indicates the gradient of vel.
-    component `j` along dimension `i`.
+    Obtain named tuple with `uτ, νₜ, k, ω, ϵ` given a set of `y, u, ν` values 
     """
-    function Smagorinsky_νₜ(
-        Δ::AbstractArray, velocity_gradient::AbstractMatrix;
-        Cₛ::Real = 0.16,
+    function (wf::WallFunction)(
+        y::AbstractVector, u::AbstractVector, ν::AbstractVector
     )
-        SijSij = first(velocity_gradient) |> similar
-        SijSij .= 0.0
+        nt = wf(u .* y ./ ν)
 
-        for i = 1:size(velocity_gradient, 1)
-            for j = 1:size(velocity_gradient, 2)
-                SijSij .+= (
-                    (
-                        velocity_gradient[i, j] .+ velocity_gradient[j, i]
-                    ) ./ 2
-                ) .^ 2
-            end
-        end
+        uτ = u ./ nt.u⁺
 
-        @. Cₛ * Δ ^ 2 * sqrt(2 * SijSij)
+        νₜ = nt.μ⁺ .* ν
+        k = nt.k⁺ .* uτ .^ 2
+        ω = k ./ νₜ
+        ϵ = @. wf.βstar * ω * k
+
+        (
+            uτ = uτ,
+            νₜ = νₜ,
+            k = k,
+            ω = ω,
+            ϵ = ϵ
+        )
     end
 
-end # module Turbulence
+end

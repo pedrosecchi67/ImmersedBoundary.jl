@@ -1,8 +1,10 @@
 module CFD
 
-    using ..LinearAlgebra
+    using LinearAlgebra
 
-    using ..DocStringExtensions
+    using DocStringExtensions
+
+    export Fluid
 
     """
     $TYPEDFIELDS
@@ -50,43 +52,7 @@ module CFD
         ), μref, Tref, S
     )
 
-    """
-    $TYPEDSIGNATURES
-
-    Convert state to primitive variables for a fluid.
-
-    Receives `ρ, eₜ, ρu, ρv[, ρw]` in scalar or array format.
-
-    Returns `p, T, u, v[, w]`.
-
-    Example:
-
-    ```
-    p, T, u, v = state2primitive(fld, ρ, et, ρu, ρv)
-    ```
-    """
-    function state2primitive(
-        fld::Fluid,
-        ρ, E, ρu...
-    )
-
-        u = map(ρui -> (ρui ./ ρ), ρu)
-
-        vel = sqrt.(
-            sum(
-                ui -> ui .^ 2,
-                u
-            )
-        )
-
-        Cv = fld.R / (fld.γ - 1.0)
-        T = @. (E - vel ^ 2 * ρ / 2) / ρ / Cv
-
-        p = @. fld.R * ρ * T
-
-        (p, T, u...)
-
-    end
+    export speed_of_sound, dynamic_viscosity, heat_conductivity
 
     """
     $TYPEDSIGNATURES
@@ -104,9 +70,11 @@ module CFD
     """
     dynamic_viscosity(
         fld::Fluid, T
-    ) = (
-        @. fld.μref * ((T / fld.Tref) ^ (2.0 / 3)) * (fld.Tref + fld.S) / (T + fld.S)
-    )
+    ) = let T = @. clamp(T, 10.0, Inf64)
+        (
+            @. fld.μref * ((T / fld.Tref) ^ (2.0 / 3)) * (fld.Tref + fld.S) / (T + fld.S)
+        )
+    end
 
     """
     $TYPEDSIGNATURES
@@ -121,374 +89,321 @@ module CFD
         k
     end
 
+    export primitive2state, state2primitive
+
     """
     $TYPEDSIGNATURES
 
     Obtain state variables from primitive variables.
+    
+    Both are given as matrices in format:
+    
+    ```
+    p, T, u, v[, w] = eachcol(P)
+    ρ, E, ρu, ρv[, ρw] = eachcol(Q)
+    ```
+    """
+    function primitive2state(
+        fluid::Fluid, P::AbstractMatrix
+    )
+        p = @view P[:, 1]
+        T = clamp.(P[:, 2], 10.0, Inf64)
+        u = @view P[:, 3:end]
 
-    Receives `p, T, u, v[, w]` in scalar or array format.
+        k = (sum(u .^ 2; dims = 2) ./ 2) |> vec
 
-    Returns `ρ, eₜ, ρu, ρv[, ρw]`.
+        ρ = @. p / (fluid.R * T)
+        E = @. ρ * (
+            fluid.R / (fluid.γ - 1.0) * T + k
+        )
+
+        [
+            ρ E (ρ .* u)
+        ]
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain primitive variables from state variables.
+    
+    Both are given as matrices in format:
+    
+    ```
+    p, T, u, v[, w] = eachcol(P)
+    ρ, E, ρu, ρv[, ρw] = eachcol(Q)
+    ```
+    """
+    function state2primitive(
+        fluid::Fluid, Q::AbstractMatrix
+    )
+        ρ = @view Q[:, 1]
+        E = @view Q[:, 2]
+        ρu = @view Q[:, 3:end]
+
+        u = ρu ./ ρ
+        k = (sum(u .^ 2; dims = 2) ./ 2) |> vec
+
+        p = @. (fluid.γ - 1.0) * (E - ρ * k)
+        T = @. clamp(p / (ρ * fluid.R), 10.0, Inf64)
+
+        [p T u]
+    end
+
+    export FlowBC
+
+    """
+    $TYPEDFIELDS
+
+    Struct to define a generic boundary condition formulation
+    """
+    struct FlowBC
+        fluid::Fluid
+        P::AbstractVector
+        normal_flow::Bool
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Constructor for a flow boundary condition.
+    If `normal_flow` is defined, the BC is not considered to be a Dirichlet condition,
+    but instead a Neumann/Robin condition for the parallel velocity component,
+    and the last velocity in `P` is imposed in the direction normal to the boundary.
 
     Example:
 
     ```
-    ρ, et, ρu, ρv = primitive2state(fld, p, T, u, v)
-    ``` 
-    """
-    function primitive2state(fld::Fluid, p, T, u...)
+    # P in [p T u v [w]] format
+    p∞, T∞, u∞, v∞ = 1e5, 288.15, 100.0, 10.0
 
-        ρ = @. p / (fld.R * T)
+    inlet_outlet = FlowBC(fluid, [p∞, T∞, u∞, v∞])
 
-        vel = sqrt.(
-            sum(
-                ui -> ui .^ 2,
-                u
+    slip_wall = FlowBC(fluid, [p∞, T∞, 0.0]; # single vel. component: normal
+        normal_flow = true)
+
+    no_slip_wall = FlowBC(fluid, [p∞, T∞, 0.0, 0.0])
+
+    domain(P) do part, P
+        # example for freestream:
+
+        impose_bc!(part, "freestream", P) do bdry, P
+            inlet_outlet(
+                P, bdry.normals
             )
-        )
-
-        Cv = fld.R / (fld.γ - 1.0)
-        et = @. ((Cv * T + vel ^ 2 / 2) * ρ)
-
-        ρu = map(ui -> ρ .* ui, u)
-
-        (ρ, et, ρu...)
-
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Utility function to obtain RMS of residual arrays
-    """
-    rms(a::AbstractArray) = sqrt(
-        sum(
-            a .^ 2
-        ) / length(a)
-    )
-
-    """
-    Evaluate HLL flux
-    """
-    _hll(ul::Real, ur::Real, fl::Real, fr::Real, Sl::Real, Sr::Real) = (
-        Sr * fl - Sl * fr + Sl * Sr * (ur - ul)
-    ) / (Sr - Sl)
-
-
-    """
-    $TYPEDSIGNATURES
-
-    Convert block-structured notation (last dim. as state variable) to matrix
-    notation (first dim. as state variable). Also returns original array size.
-    """
-    block2mat(a::AbstractArray) = (
-        (
-            ndims(a) == 2 && let n = size(a, 1)
-                @assert n != size(a, 2) "Too few cells for residual calculation"
-
-                (n in (4, 5))
-            end
-        ) ? (a, nothing) : (
-            (reshape(a, :, size(a, ndims(a))) |> permutedims), size(a)
-        )
-    )
-
-    """
-    $TYPEDSIGNATURES
-
-    Convert matrix notation (first dim. as state variable) to block-structured
-    notation (last dim. as state variable) given final array size
-    """
-    mat2block(a::AbstractMatrix, s::Union{Tuple, Nothing}) = (
-        isnothing(s) ? a : (
-            reshape(permutedims(a), s...)
-        )
-    )
-
-    """
-    $TYPEDSIGNATURES
-
-    Turn array of state variables to array of primitive variables
-    """
-    state2primitive(fld::Fluid, Q::AbstractArray) = let (q, s) = block2mat(Q)
-        p = similar(q)
-        for (prim, row) in zip(
-            state2primitive(fld, eachrow(q)...), eachrow(p)
-        )
-            row .= prim
         end
-        mat2block(p, s)
-    end
 
-    """
-    $TYPEDSIGNATURES
+        # example for Euler wall:
 
-    Turn array of primitive variables to array of state variables
-    """
-    primitive2state(fld::Fluid, P::AbstractArray) = let (p, s) = block2mat(P)
-        q = similar(p)
-        for (stat, row) in zip(
-            primitive2state(fld, eachrow(p)...), eachrow(q)
-        )
-            row .= stat
+        impose_bc!(part, "euler_wall", P) do bdry, P
+            slip_wall(
+                P, bdry.normals
+            )
         end
-        mat2block(q, s)
+
+        # example for viscous wall:
+
+        # calculate du!dn at wall somehow
+        impose_bc!(part, "neumann_wall", P) do bdry, P
+            slip_wall(
+                P, bdry.normals;
+                du!dn = du!dn,
+                image_distances = bdry.image_distances
+            )
+        end
+
+        # example for viscous wall (laminar):
+
+        impose_bc!(part, "laminar_wall", P) do bdry, P
+            no_slip_wall(
+                P, bdry.normals
+            )
+        end
     end
+    ```
+    """
+    FlowBC(
+        fluid::Fluid,
+        P::AbstractVector;
+        normal_flow::Bool = false
+    ) = FlowBC(
+        fluid, P, normal_flow
+    )
 
     """
     $TYPEDSIGNATURES
 
-    HLL Riemann solver flux evaluation. Receives primitive variable matrices
-    (one row per prim. variable) or block-structured arrays (last dim for
-    prim. variable) and a dimension number
+    Impose BCs to primitive variables.
+    See docstring for `FlowBC` constructor for examples.
     """
-    function HLL(Pl::AbstractArray, Pr::AbstractArray, dim::Int64, fluid::Fluid)
-
-        Pl, bsize = block2mat(Pl)
-        Pr, _ = block2mat(Pr)
-
-        prims_l = eachrow(Pl)
-        prims_r = eachrow(Pr)
-
-        Ql = primitive2state(fluid, Pl)
-        Qr = primitive2state(fluid, Pr)
-
-        pl = prims_l[1]
-        Tl = prims_l[2]
-        vl = prims_l[dim + 2]
-        al = speed_of_sound(fluid, Tl)
-
-        pr = prims_r[1]
-        Tr = prims_r[2]
-        vr = prims_r[dim + 2]
-        ar = speed_of_sound(fluid, Tr)
-
-        Fl = Ql .* vl'
-        Fr = Qr .* vr'
-
-        Fl[dim + 2, :] .+= pl
-        Fr[dim + 2, :] .+= pr
-
-        Fl[2, :] .+= pl .* vl
-        Fr[2, :] .+= pr .* vr
-
-        Sr = @. max(0.0, vl + al)
-        Sl = @. min(0.0, vr - ar)
-
-        (@. _hll(Ql, Qr, Fl, Fr, Sl', Sr')) |> x -> mat2block(x, bsize)
-
-    end
-
-    _Mplus(M::Real) = (
-        abs(M) > 1.0 ?
-        max(M, 0.0) :
-        (M + 1.0) ^ 2 / 4
+    function (bc::FlowBC)(
+        P::AbstractMatrix, normals::AbstractMatrix;
+        image_distances::Union{Nothing, AbstractVector} = nothing,
+        du!dn::Union{Nothing, AbstractVector} = nothing,
     )
-    _Mminus(M::Real) = (
-        abs(M) > 1.0 ?
-        min(0.0, M) :
-        - (M - 1.0) ^ 2 / 4
-    )
+        p∞ = bc.P[1]
+        T∞ = bc.P[2]
+        u∞ = bc.P[3:end]
 
-    _pplus(M::Real, p::Real) = (
-        abs(M) > 1.0 ?
-        (M + abs(M)) / (2 * M) :
-        (M + 1.0) / 2
-    ) * p
-    _pminus(M::Real, p::Real) = (
-        abs(M) > 1.0 ?
-        (M - abs(M)) / (2 * M) :
-        (1.0 - M) / 2
-    ) * p
-
-    """
-    $TYPEDSIGNATURES
-
-    AUSM scheme flux evaluation. Receives primitive variable matrices
-    (one row per prim. variable) or block-structured arrays (last dim for
-    prim. variable) and a dimension number
-    """
-    function AUSM(Pl::AbstractArray, Pr::AbstractArray, dim::Int64, fluid::Fluid)
-
-        Pl, bsize = block2mat(Pl)
-        Pr, _ = block2mat(Pr)
-
-        prims_l = eachrow(Pl)
-        prims_r = eachrow(Pr)
-
-        Ql = primitive2state(fluid, Pl)
-        Qr = primitive2state(fluid, Pr)
-
-        pl = prims_l[1]
-        Tl = prims_l[2]
-        vl = prims_l[dim + 2]
-        al = speed_of_sound(fluid, Tl)
-
-        pr = prims_r[1]
-        Tr = prims_r[2]
-        vr = prims_r[dim + 2]
-        ar = speed_of_sound(fluid, Tr)
-
-        ϕl = copy(Ql)
-        ϕl[2, :] .+= pl
-
-        ϕr = copy(Qr)
-        ϕr[2, :] .+= pr
-
-        Ml = vl ./ al
-        Mr = vr ./ ar
-
-        P = @. _pplus(Ml, pl) + _pminus(Mr, pr)
-        Mhalf = @. _Mplus(Ml) + _Mminus(Mr)
-
-        upwind = @. Mhalf > 0.0
-        F = @. ϕl * (al * Mhalf * upwind)' + ϕr * (ar * Mhalf * (1.0 - upwind))'
-
-        F[dim + 2, :] .+= P
-
-        mat2block(F, bsize)
-
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    JST-KE scheme fluxes from primitive variable arrays
-    """
-    function JSTKE(
-        Pim1::AbstractArray{Float64},
-        Pi::AbstractArray{Float64},
-        Pip1::AbstractArray{Float64},
-        Pip2::AbstractArray{Float64},
-        dim::Int64, fluid::Fluid;
-        νmin::Union{AbstractArray{Float64}, Nothing} = nothing,
-        νmin_ip1::Union{AbstractArray{Float64}, Nothing} = nothing,
-    )
-
-        Pim1, bsize = block2mat(Pim1)
-        Pi, _ = block2mat(Pi)
-        Pip1, _ = block2mat(Pip1)
-        Pip2, _ = block2mat(Pip2)
-        if isnothing(νmin)
-            νmin = 0.0
+        if bc.normal_flow
+            @assert length(bc.P) == 3 "Only 3 parcels (p, T and normal flow) allowed for normal_flow = true BC"
+            un = similar(P, (size(P, 1),))
+            un .= u∞[1]
         else
-            νmin, _ = block2mat(νmin)
+            un = normals * u∞
         end
-        if isnothing(νmin_ip1)
-            νmin_ip1 = 0.0
+
+        p = @view P[:, 1]
+        T = @view P[:, 2]
+        u = @view P[:, 3:end]
+        current_un = sum(u .* normals; dims = 2) |> vec
+
+        a = speed_of_sound(bc.fluid, T)
+
+        M = @. abs(un) / a
+
+        # note that the >[=]s here indicate that walls (un = 0.0)
+        # will have appropriate BCs
+        pb = @. (un >= 0.0) * (
+            (M > 1.0) * p∞ + (M <= 1.0) * p
+        ) + (un < 0.0) * (
+            (M > 1.0) * p + (M <= 1.0) * p∞
+        )
+        Tb = @. (un > 0.0) * T∞ + (un <= 0.0) * T
+
+        ub = nothing
+        if bc.normal_flow
+            ub = u .+ normals .* (
+                un .- current_un
+            )
         else
-            νmin_ip1, _ = block2mat(νmin_ip1)
+            ub = (@. un < 0.0) .* u .+ (@. un >= 0.0) .* u∞'
         end
 
-        pim1 = @view Pim1[1, :]
-        p = @view Pi[1, :]
-        T = @view Pi[2, :]
-        v = @view Pi[2 + dim, :]
-        pip1 = @view Pip1[1, :]
-        Tip1 = @view Pip1[2, :]
-        vip1 = @view Pip1[2 + dim, :]
-        pip2 = @view Pip2[1, :]
+        if isnothing(du!dn) != isnothing(image_distances)
+            throw(error("du!dn and image_distances must be passed together for BC imposition"))
+        end
 
-        Qi = primitive2state(fluid, Pi)
-        Qip1 = primitive2state(fluid, Pip1)
+        if !isnothing(du!dn)
+            ϵ = eps(Float64) |> sqrt
+            V = sum(ub .^ 2; dims = 2) |> vec |> x -> sqrt.(x) .+ ϵ
 
-        a = speed_of_sound(fluid, T)
-        aip1 = speed_of_sound(fluid, Tip1)
+            @. ub *= (V - du!dn * image_distances) / V
+        end
 
-        ϵ = sqrt(eps(eltype(p)))
-        ν = @. max(
-                abs(pip1 + pim1 - 2 * p) / (abs(pip1 - p) + abs(pim1 - p) + ϵ),
-                abs(pip2 + p - 2 * pip1) / (abs(pip1 - p) + abs(pip2 - pip1) + ϵ),
-                νmin, νmin_ip1
-        )
-        λ = @. max(
-                abs(v) + a, abs(vip1) + aip1
-        )
-
-        P = @. (Pi + Pip1) / 2
-        Q = primitive2state(fluid, P)
-
-        p = @view P[1, :]
-        v = @view P[dim + 2, :]
-
-        E = Q .* v'
-        E[2, :] .+= (p .* v)
-        E[dim + 2, :] .+= p
-
-        (@. E + (Qi - Qip1) * (ν * λ)' / 2) |> x -> mat2block(x, bsize)
-
+        [pb Tb ub]
     end
 
-    """
-    $TYPEDSIGNATURES
+    export ISA_atmosphere
 
-    Obtain viscous and conductive fluxes given array of primitive variables,
-    fluid struct and components of the primitive variable array gradient along each axis.
-    """
-    function viscous_fluxes(P::AbstractArray, fluid::Fluid, Pgrad::AbstractArray...;
-        μt::Union{Real, AbstractArray} = 0.0)
+    function _ISA_atmosphere(altitude_m::Real, ΔT::Real = 0.0)
+        # Constants
+        R = 287.05287  # Specific gas constant for dry air [J/(kg·K)]
+        g0 = 9.80665   # Gravitational acceleration [m/s²]
         
-        P, bsize = block2mat(P)
-        if μt isa AbstractArray
-            μt, _ = block2mat(μt)
-            μt = vec(μt)
+        # Sea level conditions
+        P0 = 101325.0   # Pressure at sea level [Pa]
+        T0 = 288.15     # Temperature at sea level [K]
+        
+        # Layer definitions [base_altitude, base_temp, lapse_rate, base_pressure]
+        # Lapse rate in K/km, converted to K/m internally
+        layers = [
+            (0.0,      288.15, -6.5,   101325.0),    # Troposphere
+            (11000.0,  216.65,  0.0,   22632.0),     # Tropopause
+            (20000.0,  216.65,  1.0,   5474.9),      # Stratosphere 1
+            (32000.0,  228.65,  2.8,   868.02),      # Stratosphere 2
+            (47000.0,  270.65,  0.0,   110.91),      # Stratopause
+            (51000.0,  270.65, -2.8,   66.939),      # Mesosphere 1
+            (71000.0,  214.65, -2.0,   3.9564)       # Mesosphere 2
+        ]
+        # Note: Above 86km, the model becomes more complex and not included here
+        
+        # Check if altitude is within valid range
+        if altitude_m < 0
+            error("Altitude cannot be negative")
+        elseif altitude_m > 86000
+            @warn "Altitude above 86 km - model accuracy decreases"
         end
-        Pgrad = [
-            block2mat(pgrad)[1] for pgrad in Pgrad
-        ]
-
-        T = @view P[2, :]
-        vels = eachrow(P)[3:end]
-        μ = dynamic_viscosity(fluid, T) .+ μt
-        k = heat_conductivity(fluid, T)
-
-        nd = length(vels)
-
-        # calculate stresses
-        velgrad = [view(Pgrad[j], i + 2, :) for i = 1:nd, j = 1:nd]
-        divu = sum(
-            i -> velgrad[i, i], 1:nd
-        )
-
-        τ = [
-            (
-                velgrad[i, j] .+ velgrad[j, i] .- (
-                    i == j ? divu .* (2.0 / 3) : 0.0
-                )
-            ) .* μ for i = 1:nd, j = 1:nd
-        ]
-
-        # calculate heat flux
-        f = [
-            pgrad[2, :] .* k for pgrad in Pgrad
-        ]
-
-        # compile along each axis
-        fluxes = AbstractArray[]
-        for i = 1:nd
-            F = similar(P)
-            F .= 0.0
-
-            F[2, :] .+= f[i] # add heat flux
-
-            # add shear contribution to energy
-            for j = 1:nd
-                F[2, :] .+= vels[j] .* τ[i, j]
+        
+        # Find the appropriate layer
+        layer_idx = 1
+        for i in 1:length(layers)-1
+            if altitude_m >= layers[i][1]
+                layer_idx = i
             end
-
-            # add viscous fluxes to momenta
-            for j = 1:nd
-                F[2 + j, :] .+= τ[i, j]
-            end
-
-            push!(
-                fluxes, mat2block(F, bsize)
-            )
         end
-
-        fluxes
-
+        
+        # Get layer parameters
+        h_base, T_base, lapse_rate, P_base = layers[layer_idx]
+        lapse_rate_per_m = lapse_rate / 1000.0  # Convert to K/m
+        
+        # Calculate geometric height difference
+        delta_h = altitude_m - h_base
+        
+        # Calculate temperature with offset
+        # Note: ΔT is applied uniformly at all altitudes
+        T = T_base + lapse_rate_per_m * delta_h + ΔT
+        
+        # Calculate pressure based on lapse rate
+        if abs(lapse_rate_per_m) < 1e-10
+            # Isothermal layer - using T_base (without offset) for pressure calculation
+            # This maintains hydrostatic consistency
+            P = P_base * exp(-g0 * delta_h / (R * (T_base + ΔT)))
+        else
+            # Gradient layer
+            exponent = -g0 / (R * lapse_rate_per_m)
+            # Use temperatures with offset for pressure calculation
+            T_base_offset = T_base + ΔT
+            T_offset = T_base_offset + lapse_rate_per_m * delta_h
+            P = P_base * (T_offset / T_base_offset)^exponent
+        end
+        
+        return (P, T)
     end
+
+    """
+    $TYPEDSIGNATURES
+
+    Return fluid and primitive variables using ISA atmosphere.
+    Allows for Mach number definition and takes a freestream direction
+    vector `û` to account for α and β.
+
+    If `V` is provided, the Mach number is disregarded and a given velocity
+    is imposed.
+    """
+    ISA_atmosphere(
+        altitude_m::Float64; 
+        ΔT::Float64 = 0.0,
+        Mach::Float64 = 0.0,
+        V::Union{Float64, Nothing} = nothing,
+        û::AbstractVector = [1.0],
+    ) = let (p, T) = _ISA_atmosphere(altitude_m, ΔT)
+        fluid = Fluid()
+
+        u = V
+        if isnothing(u)
+            a = speed_of_sound(fluid, T)
+            u = Mach * a
+        end
+
+        û = û ./ (eps(Float64) + norm(û))
+
+        (fluid, [p; T; (u .* û)])
+    end
+
+    export streamwise_direction
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain direction of the flow (normal vector) as a function
+    of `α`, in 2D.
+    """
+    streamwise_direction(α::Real) = [
+        cosd(α), sind(α)
+    ]
+
+    export pressure_coefficient
 
     """
     $TYPEDSIGNATURES
@@ -506,402 +421,170 @@ module CFD
     end
 
     """
-    $TYPEDFIELDS
+    $TYPEDSIGNATURES
 
-    Struct with freestream properties
+    Obtain direction of the flow (normal vector) as a function
+    of `α, β`, in 3D.
     """
-    struct Freestream
-        fluid::Fluid
-        p::Float64
-        T::Float64
-        v::Union{Tuple{Float64, Float64}, Tuple{Float64, Float64, Float64}}
+    streamwise_direction(α::Real, β::Real) = [
+        cosd(α) * cosd(β), - cosd(α) * sind(β), sind(α)
+    ]
+
+    _cusp_f1(m::Real, a0::Real) = (
+        (abs(m) < 1.0) * (a0 + (1.5 - 2 * a0) * m ^ 2 + (a0 - 0.5) * m ^ 4) +
+        (abs(m) >= 1.0) * abs(m)
+    )
+
+    _cusp_f2(m::Real) = (
+        (abs(m) < 1.0) * (m * (3.0 - m ^ 2) / 2) + 
+        (abs(m) >= 1.0) * sign(m)
+    )
+
+    export inviscid_fluxes
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain CUSP scheme inviscid fluxes given primitive variables on the left and right sides
+    of a face
+    """
+    function inviscid_fluxes(
+        fluid::Fluid, PL::AbstractMatrix, PR::AbstractMatrix, dim::Int;
+        a0::Real = 0.25,
+    )
+        UcL = primitive2state(fluid, PL)
+        pL = PL[:, 1]
+        UcL[:, 2] .+= pL # pressure parcel
+
+        UcR = primitive2state(fluid, PR)
+        pR = PR[:, 1]
+        UcR[:, 2] .+= pR # pressure parcel
+
+        P = @. (PL + PR) / 2
+        T = @view P[:, 2]
+        u = @view P[:, 2 + dim]
+
+        a = speed_of_sound(fluid, T)
+        M = @. u / a
+
+        F = @. u * (UcL + UcR) / 2 - _cusp_f1(M, a0) * a * (UcR - UcL) / 2
+        Fmom = @view F[:, 2 + dim]
+
+        @. Fmom += ((pR + pL) / 2 - _cusp_f2(M) * (pR - pL) / 2)
+
+        F
+    end
+
+    export Reynolds_number, adjust_Reynolds
+
+    """
+    $TYPEDSIGNATURES
+
+    Get Reynolds number given a fluid, primitive variables and a reference length
+    """
+    function Reynolds_number(
+        fluid::Fluid, P∞::AbstractVector, Lref::Real
+    )
+        V = P∞[3:end] |> norm
+        T = P∞[2]
+        p = P∞[1]
+
+        ρ = @. p / (fluid.R * T)
+        μ = dynamic_viscosity(fluid, T)
+
+        V * Lref * ρ / μ
     end
 
     """
     $TYPEDSIGNATURES
 
-    Obtain `Freestream` struct from external flow conditions.
-    Uses 3D flow if `β` is provided
+    Adjust Reynolds number by editing fluid reference viscosity and returning a new 
+    fluid struct.
     """
-    function Freestream(
-        fluid::Fluid, M∞::Float64, α::Float64, 
-        β::Union{Float64, Nothing} = nothing;
-        p::Float64 = 1e5, T::Float64 = 288.15
+    function adjust_Reynolds(
+        fluid::Fluid, P∞::AbstractVector, Lref::Real, Re::Real
     )
-        a = speed_of_sound(fluid, T)
+        Re_old = Reynolds_number(fluid, P∞, Lref)
+        μref = fluid.μref * Re_old / Re
 
-        Freestream(
-            fluid, p, T,
-            (
-                isnothing(β) ?
-                (cosd(α), sind(α)) .* (M∞ * a) :
-                (
-                    cosd(α) * cosd(β), 
-                    - sind(β) * cosd(α),
-                    sind(α)
-                ) .* (M∞ * a)
-            )
+        Fluid(
+            fluid.R, fluid.γ, fluid.k, μref, fluid.Tref, fluid.S
         )
     end
 
+    export viscous_fluxes
+
     """
     $TYPEDSIGNATURES
 
-    Obtain initial guess (state variables) for an N-cell mesh given
-    freestream properties
+    Obtain inviscid fluxes given a fluid, primitive variables and primitive variable gradients
+    (a vector of matrices, with each matrix corresponding to the gradient along one axis).
+    Returns fluxes along all Cartesian dimensions.
+
+    Example:
+
+    ```
+    Pgrad = [
+        δ(part, P, dim) for dim = 1:3
+    ]
+    
+    Fvx, Fvy, Fvz = viscous_fluxes(fluid, P, Pgrad)
+    ```
     """
-    initial_guess(free::Freestream, N::Int64) = primitive2state(
-        free.fluid,
-        fill(free.p, N), fill(free.T, N),
-        [
-            fill(vv, N) for vv in free.v
-        ]...
+    function viscous_fluxes(
+        fluid::Fluid, P::AbstractMatrix, Pgrad::AbstractVector;
+        μₜ::Union{AbstractVector, Real} = 0.0
     )
+        T = @view P[:, 2]
 
-    _gram_schmidt(
-        u::Tuple
-    ) = let u = collect(u)
-        nu = norm(u)
+        μ = dynamic_viscosity(fluid, T) .+ μₜ
+        k = heat_conductivity(fluid, T)
 
-        if nu > eps(eltype(u))
-            u ./= nu
-        else
-            u .= 0.0
-            u[1] = 1.0
+        nd = size(P, 2) - 2
+
+        vel_grad = [
+            Pgrad[j][:, 2 + i] for i = 1:nd, j = 1:nd
+        ]
+        vels = [
+            P[:, 2 + dim] for dim = 1:nd
+        ]
+
+        # shear tensor
+        divu = similar(T)
+        divu .= 0.0
+        for i = 1:nd
+            divu .+= vel_grad[i, i]
         end
 
-        v = similar(u)
-        v .= 0.0
-        v[2] = 1.0
+        τ = [
+            (
+                (vel_grad[i, j] .+ vel_grad[j, i]) .- (i == j ? 2.0 / 3.0 : 0.0) .* divu
+            ) .* μ for i = 1:nd, j = 1:nd
+        ]
 
-        v .-= (v ⋅ u) .* u
-
-        nv = norm(v)
-
-        if nv > eps(eltype(u))
-            v ./= nv
-        else
-            v .= 0.0
-            v[1] = 1.0
-        end
-
-        if length(u) == 2
-            return [u v]
-        end
+        # heat fluxes
+        f = [
+            pgrad[:, 2] .* k for pgrad in Pgrad
+        ]
 
         [
-            u v cross(u, v)
+            let F = similar(P)
+                F .= 0.0
+
+                # energy
+                F[:, 2] .+= f[dim]
+                for j = 1:nd
+                    F[:, 2] .+= τ[dim, j] .* vels[j]
+                end
+
+                # momentum
+                for j = 1:nd
+                    F[:, 2 + j] .+= τ[dim, j]
+                end
+
+                F
+            end for dim = 1:nd
         ]
     end
 
-    _tocoords(M::AbstractMatrix, u, v) = (
-        u .* M[1, 1] .+ v .* M[2, 1],
-        u .* M[1, 2] .+ v .* M[2, 2]
-    )
-    _tocoords(M::AbstractMatrix, u, v, w) = (
-        u .* M[1, 1] .+ v .* M[2, 1] .+ w .* M[3, 1],
-        u .* M[1, 2] .+ v .* M[2, 2] .+ w .* M[3, 2],
-        u .* M[1, 3] .+ v .* M[2, 3] .+ w .* M[3, 3],
-    )
-
-    _fromcoords(M::AbstractMatrix, u...) = _tocoords(M', u...)
-
-    """
-    $TYPEDSIGNATURES
-
-    Rotate and rescale state variables to match new freestream properties
-    """
-    function rotate_and_rescale!(
-        old::Freestream, new::Freestream, ρ::AbstractArray, E::AbstractArray, ρvs::AbstractArray...
-    )
-        state_old = primitive2state(
-            old.fluid, old.p, old.T, old.v...
-        )
-        state_new = primitive2state(
-            new.fluid, new.p, new.T, new.v...
-        )
-
-        Mold = _gram_schmidt(old.v)
-        Mnew = _gram_schmidt(new.v)
-
-        ρ .*= (state_new[1] / state_old[1])
-        E .*= (state_new[2] / state_old[2])
-
-        ρV_ratio = (state_new[1] / state_old[1]) * (
-            norm(new.v) / (norm(old.v) + eps(Float64))
-        )
-
-        Mold = _gram_schmidt(old.v)
-        Mnew = _gram_schmidt(new.v)
-
-        for ρv in ρvs
-            ρv .*= ρV_ratio
-        end
-
-        for (v, vnew) in zip(
-            ρvs,
-            _fromcoords(
-                Mnew, _tocoords(
-                    Mold, ρvs...
-                )...
-            )
-        )
-            v .= vnew
-        end
-    end
-
-    """
-    $TYPEDFIELDS
-
-    Struct used for time averaging of a given property.
-    Stores exponential moving average (`μ`) and its standard
-    deviation (`σ`) for a moving average timescale `τ`.
-    """
-    mutable struct TimeAverage
-        τ::Real
-        μ::Any
-        σ::Any
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Constructor for a time-averaged property monitor
-    """
-    TimeAverage(τ::Real) = TimeAverage(τ, nothing, nothing)
-
-    """
-    $TYPEDSIGNATURES
-
-    Add registry to a time-averaged property struct.
-
-    Runs:
-
-    ```
-    η = dt / τ
-
-    σ = √(σ ^ 2 * (1 - η) + (μ - Q) ^ 2 * η)
-    μ = μ * (1 - η) + Q * η
-    ```
-    """
-    function Base.push!(avg::TimeAverage, Q, dt = 1.0)
-
-        # first registry
-        if isnothing(avg.μ)
-            avg.μ = copy(Q)
-            avg.σ = avg.μ .* 0.0
-
-            return avg.μ
-        end
-
-        if isa(dt, AbstractArray)
-            if ndims(dt) == 1 && ndims(Q) > 1
-                dt = reshape(dt, fill(1, ndims(Q) - 1)..., length(dt))
-            end
-        end
-
-        η = @. dt / avg.τ
-
-        if isa(Q, AbstractArray)
-            @. avg.σ = sqrt(avg.σ ^ 2 * (1.0 - η) + (avg.μ - Q) ^ 2 * η)
-            @. avg.μ = avg.μ * (1.0 - η) + Q * η
-        else
-            avg.σ = @. sqrt(avg.σ ^ 2 * (1.0 - η) + (avg.μ - Q) ^ 2 * η)
-            avg.μ = @. avg.μ * (1.0 - η) + Q * η
-        end
-
-        avg.μ
-
-    end
-
-    """
-    $TYPEDFIELDS
-
-    Struct to hold a set of convergence criteria
-    """
-    mutable struct ConvergenceCriteria
-        r0::Float64
-        iterations::Int64
-        rtol::Float64
-        atol::Float64
-        max_iterations::Int64
-    end
-
-    """
-    $TYPEDSIGNATURES
-    
-    Constructor for convergence criteria. Convergence is reached if
-    `r < r0 * rtol + atol` or `n_iterations > max_iterations`.
-    """
-    ConvergenceCriteria(
-        ;
-        max_iterations::Int64 = typemax(Int64),
-        rtol::Float64 = 1e-7,
-        atol::Float64 = 1e-7,
-    ) = ConvergenceCriteria(
-        0.0, 0, 
-        rtol, atol, max_iterations
-    )
-
-    """
-    $TYPEDSIGNATURES
-
-    Register new residual array/scalar to a convergence monitor.
-    The iteration count is incremented.
-
-    Returns false if `r >= r0 * rtol + atol` and `n_iterations < max_iterations`.
-    """
-    function Base.push!(conv::ConvergenceCriteria, r)
-        r = norm(r)
-
-        if conv.iterations == 0
-            conv.r0 = r
-        end
-
-        conv.iterations += 1
-        if conv.iterations >= conv.max_iterations
-            return true
-        end
-
-        if r < conv.r0 * conv.rtol + conv.atol
-            return true
-        end
-
-        return false
-    end
-
-    """
-    $TYPEDFIELDS
-
-    Struct to hold a CTU counter
-    """
-    mutable struct CTUCounter
-        adimensional_time::Float64
-        L::Float64
-        λ::Float64
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Constructor for a CPU counter.
-    Counts `V × t / L` if `count_speed_of_sound = false`
-    or `(V + a) × t / L` otherwise.
-
-    `freestream` may be a scalar or a `Freestream` struct.
-    If `freestream` is a scalar, it is considered to be the
-    characteristic velocity of the flow.
-    """
-    function CTUCounter(
-        L::Float64, freestream;
-        count_speed_of_sound::Bool = false
-    )
-        λ = freestream
-        if freestream isa Freestream
-            λ = norm(freestream.v)
-
-            if count_speed_of_sound
-                λ += speed_of_sound(
-                    freestream.fluid, freestream.T
-                )
-            end
-        end
-
-        CTUCounter(0.0, L, λ)
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Add time step to CTU counter and return the resulting
-    CTU count
-    """
-    Base.push!(cnt::CTUCounter, dt) = let dtmin = minimum(dt)
-        cnt.adimensional_time += dtmin * cnt.λ / cnt.L
-
-        cnt.adimensional_time
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Reduce value of `dt` for each cell until no `NaN` or `Inf` is found.
-
-    Done in-place. Returns final residual, the number of cells with timestep reductions and
-    the maximum time-step reduction factor.
-
-    Function `f(dt, Q, args...; kwargs...)` should return `dQ!dt`, 
-    where `Q` is a state variable matrix with shape `(nvars, ncells)` or
-    `(ncells, nvars)`.
-
-    If `check_residuals = true`, both `Qnew` and `f(dt, Qnew)`, for 
-    `Qnew = Q .+ f(dt, Q) .* dt`, are checked for violations.
-    """
-    function clip_CFL!(
-        f,
-        dt::AbstractVector{Float64}, Q::AbstractMatrix{Float64}, 
-        args::AbstractMatrix{Float64}...;
-        reduction_ratio::Real = 0.5,
-        check_residuals::Bool = false,
-        max_iterations::Int = 10,
-        lower_boundary::Union{AbstractVector{Float64}, Float64} = -Inf64,
-        upper_boundary::Union{AbstractVector{Float64}, Float64} = Inf64,
-        kwargs...
-    )
-        min_ratio = 1.0
-
-        r = q -> f(dt, q, args...; kwargs...)
-
-        # check if input is in column-major order
-        col_major = false
-        if size(Q, 1) < length(dt)
-            dt = dt'
-            col_major = true
-        else
-            lower_boundary = lower_boundary'
-            upper_boundary = upper_boundary'
-        end
-
-        is_valid = u -> let iv = any(
-            uu -> !(isnan(uu) || isinf(uu)), u;
-            dims = (col_major ? 1 : 2)
-        )
-            if !(isinf(lower_boundary) && isinf(upper_boundary))
-                iv .= iv .&& any(
-                    (@. u >= lower_boundary && u <= upper_boundary);
-                    dims = (col_major ? 1 : 2)
-                )
-            end
-
-            iv
-        end
-
-        reduced = falses(length(dt))
-
-        Qnew = copy(Q)
-        for _ = 1:max_iterations
-            Qnew .= Q .+ r(Q) .* dt
-            iv = is_valid(Qnew)
-
-            if all(iv)
-                break
-            end
-
-            if check_residuals
-                iv .= iv .&& is_valid(r(Qnew))
-            end
-
-            # reduce timestep for invalid cells
-            @. dt = dt * max(iv, reduction_ratio)
-            @. reduced = reduced || (!iv)
-            min_ratio *= reduction_ratio
-        end
-
-        # to save memory:
-        residual = Qnew
-        residual .= (Qnew .- Q) ./ dt
-
-        (residual, sum(reduced), min_ratio)
-    end
-
-end # module CFD
+end

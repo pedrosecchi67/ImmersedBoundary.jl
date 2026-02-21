@@ -1,6 +1,5 @@
-import ImmersedBoundary as ibm
+using ImmersedBoundary
+using ImmersedBoundary.CFD
 
-using LinearAlgebra
-
-include("n0012.jl")
+include("rae2822.jl")
 
