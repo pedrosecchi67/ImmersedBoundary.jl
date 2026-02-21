@@ -324,6 +324,49 @@ struct Boundary
 end
 ```
 
+# Postprocessing with surfaces
+
+Surfaces may be used for postprocessing and coefficient integration. Example:
+
+```julia
+surf = dom.surfaces["wall"]
+
+Cp_wall = surf(Cp) # interpolate array of field properties to wall
+
+CX, CY = surface_integral(
+    surf, Cp_wall .* surf.normals # surf.centers is also available
+)
+```
+
+Values may also be obtained an offset away from the surface in order to obtain
+values like `τ` at the wall in wall-modelled simulations:
+
+```julia
+surf = dom.surfaces["wall"]
+
+τ = μ .* (
+    at_offset(surf, V) .- surf(V)
+) ./ surf.offsets # wall-normal gradient
+```
+
+To export, the kwarg `surface_data` is available in `export_vtk`:
+
+```julia
+export_vtk("destination", domain;
+    surface_data = Dict(
+        "wall" => (
+            Cp = wall(Cp), # example
+            τ = μ .* (
+                at_offset(wall, V) .- wall(V)
+            ) ./ surf.offsets
+        ),
+        "other_wall" => (
+            #...
+        )
+    )
+)
+```
+
 # CFD utilities
 
 Check out the docstrings for the following functions and structs:
