@@ -345,6 +345,7 @@ inviscid_fluxes
 viscous_fluxes
 Reynolds_number
 adjust_Reynolds
+TimeAverage
 
 using ImmersedBoundary.Turbulence
 
