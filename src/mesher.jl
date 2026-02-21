@@ -456,7 +456,7 @@ module Mesher
             hloc = h
             for (df, href) in refinement_regions
                 hloc = min(
-                    h, max(df(phalf) * (growth_ratio - 1.0), href)
+                    hloc, max((df(phalf) - L) * (growth_ratio - 1.0), href)
                 )
             end
 
@@ -928,8 +928,7 @@ module Mesher
                 ]
                 ```
         * A cell growth ratio;
-        * An interior point reference, and, along with it, a boundary surface
-            for domain clipping; and
+        * An interior point reference; and
         * A ghost layer ratio, which defines the thickness of the ghost cell layer
             within a solid as a ratio of the local cell circumdiameter.
 
@@ -960,7 +959,6 @@ module Mesher
         origin::Vector{Float64}, widths::Vector{Float64},
         surfaces::Tuple{String, Stereolitography, Float64}...;
         interior_reference::Union{Vector{Float64}, Nothing} = nothing,
-        boundary_surface::Union{Stereolitography, Nothing} = nothing,
         growth_ratio::Float64 = 1.1,
         ghost_layer_ratio::Float64 = 1.5,
         refinement_regions = [],
@@ -1094,7 +1092,7 @@ module Mesher
         for ((sname, _, _), dfield) in zip(
             surfaces, distance_fields
         )
-            if length(sname) > 0.0 # not only meshing resource
+            if length(sname) > 0 # not only meshing resource
                 if !haskey(family_distances, sname)
                     family_distances[sname] = fill(Inf64, ncells)
                     family_projections[sname] = Matrix{Float64}(undef, nd, ncells)
@@ -1155,10 +1153,7 @@ module Mesher
         in_domain = trues(ncells)
         ϵ = eps(Float64)
 
-        @assert isnothing(boundary_surface) == isnothing(interior_reference) "Arguments boundary_surface and interior_reference must be used together"
-        if !(
-            isnothing(boundary_surface) || isnothing(interior_reference)
-        )
+        if !isnothing(interior_reference)
             verbose && println("Generating KD-tree...")
             t0 = time()
 

@@ -109,8 +109,7 @@ Generate an octree/quadtree mesh described by:
     ]
     ```
 * A cell growth ratio;
-* An interior point reference, and, along with it, a boundary surface
-    for domain clipping; and
+* An interior point reference; and
 * A ghost layer ratio, which defines the thickness of the ghost cell layer
     within a solid as a ratio of the local cell circumdiameter.
 

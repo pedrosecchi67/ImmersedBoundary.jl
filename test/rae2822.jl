@@ -11,9 +11,8 @@ msh = Mesh(
     [80.0, 80.0],
     ("wall", stl, 4e-3);
     refinement_regions = [
-        (feature_dfield, 1e-3),
+        (feature_dfield, 0.5e-3),
     ],
-    boundary_surface = stl,
     interior_reference = [2.0, 2.0],
     hypercube_families = [
         "freestream" => [(1, false), (1, true), (2, false), (2, true)],
