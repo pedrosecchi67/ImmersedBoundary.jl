@@ -978,7 +978,7 @@ module Mesher
         surfaces = [
             (
                 sname,
-                refine_to_length(stl, h;
+                refine_to_length(stl, h / 2;
                     tolerance = merge_tolerance,
                     growth_ratio = growth_ratio,
                     refinement_regions = refinement_regions),
@@ -1005,7 +1005,7 @@ module Mesher
                             tolerance = merge_tolerance,
                             growth_ratio = growth_ratio,
                             refinement_regions = [
-                                (dfield, h)
+                                (dfield, h / 2)
                             ]
                         ),
                         L
