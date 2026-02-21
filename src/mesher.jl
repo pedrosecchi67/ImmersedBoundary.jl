@@ -603,7 +603,7 @@ module Mesher
             v = simplex[:, 2] .- simplex[:, 1]
 
             n = [
-                - v[2], v[1]
+                v[2], - v[1]
             ]
             if normalize
                 return n ./ (norm(v) + ϵ)
