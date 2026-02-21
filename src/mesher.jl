@@ -1,338 +1,82 @@
 module Mesher
 
-        using Base.Threads
+    using DocStringExtensions
 
-        include("stereolitography.jl")
-        using .STLHandler
+    using LinearAlgebra
+    using NearestNeighbors
 
-        using .STLHandler.WriteVTK
+    using DelimitedFiles
+    using WriteVTK
 
-        using DocStringExtensions
+    export Stereolitography, refine_to_length, merge_points,
+        Box, Ball, Line, DistanceField,
+        feature_regions, centers_and_normals,
+        vtk_grid, vtk_save,
+        Mesh
 
-        using LinearAlgebra
-
-        using JSON
-
-        """
-        $TYPEDFIELDS
-
-        Struct to describe a projection upon a surface and its point-and-polygon status
-        """
-        struct Projection
-                projection::Vector{Float64}
-                interior::Bool
-        end
-
-        """
-        $TYPEDFIELDS
-
-        Struct to describe a cell
-        """
-        struct Cell
-                origin::Vector{Float64}
-                widths::Vector{Float64}
-                projections::Vector{Projection}
-        end
-
-        """
-        $TYPEDFIELDS
-
-        Struct to overload STLTrees with naive projections upon simplices when there are 
-        too few facets to justify a tree
-        """
-        struct NaiveSTLTree
-                stl::Stereolitography
-        end
-
-        """
-        $TYPEDSIGNATURES
-
-        Obtain projection and distance on naive STL tree
-        """
-        function (tree::NaiveSTLTree)(x::AbstractVector{Float64})
-                if size(tree.stl.simplices, 2) == 0
-                    return (copy(x), 0.0)
-                end
-
-                p = STLHandler.proj2stl(tree.stl, x)
-                d = norm(x .- p)
-
-                (p, d)
-        end
-
-        """
-        $TYPEDSIGNATURES
-
-        Obtain point-in-polygon query for NaiveSTLTree struct
-        """
-        function STLHandler.point_in_polygon(
-                tree::NaiveSTLTree, x::AbstractVector{Float64};
-                outside_reference = nothing
-        )
-                if size(tree.stl.simplices, 2) == 0
-                    return false
-                end
-
-                if isnothing(outside_reference)
-                        outside_reference = map(minimum, eachrow(tree.stl.points))
-                end
-
-                STLHandler.n_crossings(tree.stl, outside_reference, x) % 2 == 1
-        end
-
-        """
-        $TYPEDFIELDS
-
-        Struct to describe a plane SDF surrogate to an STLTree
-        """
-        struct PlaneSDF
-            normal::Vector{Float64}
-            linear_coeff::Float64
-        end
-
-        """
-        $TYPEDSIGNATURES
-
-        Obtain projection and distance given PlaneSDF
-        """
-        function (plane::PlaneSDF)(x::AbstractVector{Float64})
-                d = (x ⋅ plane.normal - plane.linear_coeff)
-                p = x .- d .* plane.normal
-                
-                (p, d)
-        end
-
-        """
-        $TYPEDSIGNATURES
-
-        Run point-in-polygon query to PlaneSDF
-        """
-        function STLHandler.point_in_polygon(plane::PlaneSDF, x::AbstractVector{Float64};
-                outside_reference = nothing)
-                d = (x ⋅ plane.normal - plane.linear_coeff)
-
-                if isnothing(outside_reference)
-                    return (d < 0.0)
-                end
-
-                dref = (outside_reference ⋅ plane.normal - plane.linear_coeff)
-                (d * dref < 0.0)
-        end
-
-        """
-        $TYPEDSIGNATURES
-
-        Obtain PlaneSDF from a projection
-        """
-        function PlaneSDF(p::Projection, x::AbstractVector{Float64})
-                n = x .- p.projection
-                nn = norm(n) + sqrt(eps(eltype(x)))
-                
-                if p.interior
-                    nn = - nn
-                end
-
-                n ./= nn
-
-                linear_coeff = p.projection ⋅ n
-                PlaneSDF(n, linear_coeff)
-        end
-
-        """
-        $TYPEDSIGNATURES
-
-        Decide between a naive or full STL tree
-        """
-        function smart_stltree(stl::Stereolitography;
-                leaf_size::Int64 = 1,
-                threshold::Int64 = 20)
-                if size(stl.simplices, 2) < threshold
-                        return NaiveSTLTree(stl)
-                end
-
-                STLTree(stl; leaf_size = leaf_size)
-        end
-
-        """
-        $TYPEDSIGNATURES
-
-        Filter stereolitography object according to mask that identifies remaining
-        simplices
-        """
-        function stereolitography_mask(stl::Stereolitography, mask)
-                simplices = stl.simplices[:, mask]
-
-                remaining_mask = falses(size(stl.points, 2))
-                remaining_mask[simplices] .= true
-                remaining = findall(remaining_mask)
-
-                new_indices = zeros(Int64, size(stl.points, 2))
-                new_indices[remaining] .= 1:length(remaining)
-
-                points = stl.points[:, remaining]
-                simplices = new_indices[simplices]
-
-                Stereolitography(points, simplices)
-        end
-
-        """
-        $TYPEDSIGNATURES
-
-        Filter stereolitography to simplices within range of a given cell
-        """
-        function local_stereolitography(
-                stl::Stereolitography, c::Cell
-        )
-                center = c.origin .+ c.widths ./ 2
-                circumradius = norm(c.widths) / 2
-
-                ds = map(
-                        simp -> norm(
-                                STLHandler.proj2simplex(stl.points[:, simp], center) .- center
-                        ), 
-                        eachcol(stl.simplices)
-                )
-                dmin = minimum(ds)
-
-                R = dmin + circumradius * 1.1
-                mask = @. ds < R
-
-                stereolitography_mask(stl, mask)
-        end
-
-        """
-        $TYPEDFIELDS
-
-        Struct containing a triangulation and a point-in-polygon reference
-        to produce Projections
-        """
-        struct TriReference
-                triangulation::Union{STLTree, NaiveSTLTree, PlaneSDF}
-                reference_point::Vector{Float64}
-                interior::Bool
-        end
-
-        """
-        $TYPEDSIGNATURES
-
-        Construct a TriReference from scratch.
-        """
-        function TriReference(
-                stl::Stereolitography;
-                outside_reference = nothing
-        )
-                if isnothing(outside_reference)
-                        mins = map(minimum, eachrow(stl.points))
-                        maxs = map(maximum, eachrow(stl.points))
-
-                        w = maxs .- mins
-                        outside_reference = mins .- 0.1 .* w
-                end
-
-                TriReference(
-                        smart_stltree(stl),
-                        outside_reference,
-                        false
-                )
-        end
-
-        """
-        $TYPEDSIGNATURES
-
-        Obtain Projection from TriReference
-        """
-        function Projection(
-                reference::TriReference,
-                x::AbstractVector{Float64}
-        )
-                tree = reference.triangulation
-                interior = reference.interior
-
-                if point_in_polygon(tree, x; outside_reference = reference.reference_point)
-                    interior = (interior ? false : true)
-                end
-
-                p, _ = tree(x)
-                Projection(p, interior)
-        end
-
-        """
-        ```
-            struct Box
-                origin::AbstractVector
-                widths::AbstractVector
-            end
-        ```
-
-        Struct defining a refinement box
-        """
+    """
+    ```
         struct Box
             origin::AbstractVector
             widths::AbstractVector
         end
+    ```
 
-        """
-        ```
-            (b::Box)(pt::AbstractVector)
-        ```
+    Struct defining a refinement box
+    """
+    struct Box
+        origin::AbstractVector
+        widths::AbstractVector
+    end
 
-        Distance to a box
-        """
-        (b::Box)(pt::AbstractVector) = norm(
-            (
-                @. min(
-                    abs(pt - b.origin),
-                    abs(pt - b.origin - b.widths)
-                ) * (pt - b.origin > b.widths || pt < b.origin)
-            )
+    """
+    ```
+        (b::Box)(pt::AbstractVector)
+    ```
+
+    Distance to a box
+    """
+    (b::Box)(pt::AbstractVector) = norm(
+        (
+            @. min(
+                abs(pt - b.origin),
+                abs(pt - b.origin - b.widths)
+            ) * (pt - b.origin > b.widths || pt < b.origin)
         )
+    )
 
-        """
-        ```
-            struct Ball
-                center::AbstractVector
-                radius::Real
-            end
-        ```
-
-        Struct to define a ball
-        """
+    """
+    ```
         struct Ball
             center::AbstractVector
             radius::Real
         end
+    ```
 
-        """
-        ```
-            (b::Ball)(pt::AbstractVector) = max(
-                0.0,
-                norm(b.center .- pt) - b.R
-            )
-        ```
+    Struct to define a ball
+    """
+    struct Ball
+        center::AbstractVector
+        radius::Real
+    end
 
-        Distance to a ball
-        """
+    """
+    ```
         (b::Ball)(pt::AbstractVector) = max(
             0.0,
-            norm(b.center .- pt) - b.radius
+            norm(b.center .- pt) - b.R
         )
+    ```
 
-        """
-        ```
-            struct Line
-                p1::AbstractVector
-                p2::AbstractVector
-                m::AbstractVector
+    Distance to a ball
+    """
+    (b::Ball)(pt::AbstractVector) = max(
+        0.0,
+        norm(b.center .- pt) - b.radius
+    )
 
-                Line(p1::AbstractVector, p2::AbstractVector) = new(
-                    p1, p2,
-                    p2 .- p1
-                )
-            end
-        ```
-
-        Struct to define a line
-        """
+    """
+    ```
         struct Line
             p1::AbstractVector
             p2::AbstractVector
@@ -343,240 +87,830 @@ module Mesher
                 p2 .- p1
             )
         end
+    ```
 
-        """
-        ```
-            (l::Line)(pt::AbstractVector)
-        ```
+    Struct to define a line
+    """
+    struct Line
+        p1::AbstractVector
+        p2::AbstractVector
+        m::AbstractVector
 
-        Distance to a line
-        """
-        (l::Line)(pt::AbstractVector) = let ξ = l.m \ (pt .- l.p1)
-            if ξ < 0.0
-                return norm(pt .- l.p1)
-            elseif ξ > 1.0
-                return norm(pt .- l.p2)
-            end
-
-            norm(
-                pt .- (l.p1 .+ l.m .* ξ)
-            )
-        end
-
-        """
-        ```
-            struct Triangulation
-                tree::STLTree
-
-                Triangulation(stl::Stereolitography) = new(
-                    STLTree(stl)
-                )
-            end
-        ```
-
-        Struct to define the distance function to a triangulated surface
-        """
-        struct Triangulation
-            tree::STLTree
-
-            Triangulation(stl::Stereolitography) = new(
-                STLTree(stl)
-            )
-        end
-
-        """
-        ```
-            (tri::Triangulation)(pt::AbstractVector)
-        ```
-
-        Distance to a triangulated surface
-        """
-        (tri::Triangulation)(pt::AbstractVector) = tri.tree(pt)[2]
-
-        """
-        $TYPEDSIGNATURES
-
-        Simplify triangulation references.
-
-        Reduces triangulation trees to planar signed distance functions
-        once a cell is distant from the surface by more than 
-        `d > approximation_ratio * norm(c.widths) / 2`.
-        """
-        function simplify_triref(
-            p::Projection, d::Float64, ref::TriReference, c::Cell;
-            approximation_ratio::Float64 = 2.0, 
-            filter_tris::Bool = false,
+        Line(p1::AbstractVector, p2::AbstractVector) = new(
+            p1, p2,
+            p2 .- p1
         )
-            if !(ref.triangulation isa PlaneSDF) # already simplified?
-                center = c.origin .+ c.widths ./ 2
-                circumradius = norm(c.widths) / 2
+    end
 
-                if d > approximation_ratio * circumradius
-                    return TriReference(
-                        PlaneSDF(p, center),
-                        center, p.interior
-                    )
-                else
-                    if filter_tris
-                        local_stl = local_stereolitography(ref.triangulation.stl, c)
+    """
+    ```
+        (l::Line)(pt::AbstractVector)
+    ```
 
-                        return TriReference(
-                            smart_stltree(local_stl), center, p.interior
-                        )
-                    elseif norm(p.projection .- center) > circumradius * 0.001
-                        return TriReference( # re-define reference for shorter ray-tracing
-                            ref.triangulation, center, p.interior
-                        )
+    Distance to a line
+    """
+    (l::Line)(pt::AbstractVector) = let ξ = l.m \ (pt .- l.p1)
+        if ξ < 0.0
+            return norm(pt .- l.p1)
+        elseif ξ > 1.0
+            return norm(pt .- l.p2)
+        end
+
+        norm(
+            pt .- (l.p1 .+ l.m .* ξ)
+        )
+    end
+
+    module STLReader
+
+        function is_ascii(file_path::String)
+            # Open the file in read mode
+            first_string = open(file_path, "r") do file
+                # Read the first 5 characters from the file
+                first_chars = read(file, 5)
+
+                # Convert the read bytes to a string
+                first_string = String(first_chars)
+            end
+
+            return first_string == "solid"
+        end
+
+        function read_stl_ascii(filename::String)
+            vertices = Vector{Vector{Float64}}()
+            faces = Vector{Vector{Int64}}()
+
+            face = Int64[]
+            open(filename, "r") do file
+                for _line in eachline(file)
+                    line = strip(_line)
+
+                    if startswith(line, "vertex")
+                        # Extract vertex coordinates
+                        coords = split(line)
+                        x = parse(Float64, coords[2])
+                        y = parse(Float64, coords[3])
+                        z = parse(Float64, coords[4])
+                        push!(vertices, [x, y, z])
+                        push!(face, length(vertices))
+                    elseif startswith(line, "facet normal")
+                        # Start of a new face
+                        face = Vector{Int64}()
+                    elseif startswith(line, "endloop")
+                        # End of a face, add it to the faces list
+                        push!(faces, face)
                     end
                 end
             end
 
-            ref
+            vertices = reduce(hcat, vertices)
+            faces = reduce(hcat, faces)
+
+            return vertices, faces
+        end
+
+        function read_stl_binary(filename::String)
+                contents = open(filename, "r") do file
+                    read(file)
+                end
+
+                N0 = 0
+                popN = N -> let r = (N0+1):(N0+N)
+                    v = contents[r]
+                    N0 += N
+
+                    v
+                end
+
+                # header
+                _ = popN(80)
+
+                # number of tris
+                ntri = reinterpret(UInt32, popN(4))[1] |> Int64
+
+                points = zeros(Float64, 3, 3 * ntri)
+                simplices = zeros(Int64, 3, ntri)
+
+                for k = 1:ntri
+                    _ = popN(12) # normal
+
+                    points[:, 3*(k-1)+1] .= Float64.(reinterpret(Float32, popN(12)))
+                    points[:, 3*(k-1)+2] .= Float64.(reinterpret(Float32, popN(12)))
+                    points[:, 3*(k-1)+3] .= Float64.(reinterpret(Float32, popN(12)))
+
+                    simplices[:, k] .= (3*(k-1)+1):(3*(k-1)+3)
+
+                    _ = popN(2)
+                end
+
+                (points, simplices)
         end
 
         """
-        $TYPEDSIGNATURES
+        ```
+            read_stl(filename::String)
+        ```
 
-        Refine a cell until all criteria are met.
-        Called recursively
+        Read STL file and return a matrix of points (shape (3, ...)) and a matrix of
+        simplices (shape (3, ...)).
         """
-        function fixed_mesh_refine(
-                c::Cell, 
-                surfaces::Vector{TriReference},
-                local_lengths::Vector{Float64},
-                refinement_regions, refinement_lengths,
-                growth_ratio::Float64,
-                max_length::Float64,
-                ghost_layer_ratio::Float64,
-                depth::Int64,
-                approximation_ratio::Float64,
-                filter_triangles_every::Int64,
-                _mgrid_depth::Int64,
+        function read_stl(filename::String)
+
+            if is_ascii(filename)
+                return read_stl_ascii(filename)
+            end
+
+            read_stl_binary(filename)
+
+        end
+
+    end
+    using .STLReader: read_stl
+
+    """
+    $TYPEDFIELDS
+
+    Struct to represent stereolitography data
+
+    Each column in `points` represents a point in space, and each 
+    column in `simplices`, the point indicesfor a simplex face
+    """
+    struct Stereolitography
+        points::AbstractMatrix{Float64}
+        simplices::AbstractMatrix{Int64}
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain stereolitography object from an array of points in Selig format
+    (counter-clockwise, forming a 2D surface, with each column representing a point).
+    If `closed = true` (default), a closed surface is imposed.
+    """
+    function Stereolitography(
+        points::AbstractMatrix{Float64};
+        closed::Bool = true,
+    )
+        simplices = let inds = 1:size(points, 2)
+            (
+                closed ?
+                [
+                    inds'; circshift(inds, -1)'
+                ] :
+                [
+                    inds[1:(end - 1)]'; inds[2:end]'
+                ]
+            )
+        end
+
+        Stereolitography(points, simplices)
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain stereolitography data from mesh file.
+
+    Disconsiders any mesh elements that aren't triangles.
+
+    If a .dat file is provided, it will be interpreted as a Selig-format dat file
+    describing a closed two-dimensional surface. It should include no header
+    """
+    function Stereolitography(
+        fname::String,
+    )
+
+        if fname[(end - 3):end] in (".dat", ".DAT") # Selig format airfoil
+            return Stereolitography(permutedims(readdlm(fname)); closed = true)
+        end
+
+        points, simplices = read_stl(
+            fname
         )
-                center = c.origin .+ c.widths ./ 2
 
-                ds = map(
-                         p -> norm(p.projection .- center) * (1 - 2 * p.interior), c.projections
-                )
+        Stereolitography(points, simplices)
 
-                surfaces = map(
-                    (p, ref, d) -> simplify_triref(
-                        p, d, ref, c;
-                        approximation_ratio = approximation_ratio,
-                        filter_tris = filter_triangles_every != 0 && (
-                            depth % filter_triangles_every == 0
-                        ),
-                    ), c.projections, surfaces, ds
-                )
+    end
 
-                L = maximum(c.widths)
-                Lmax = minimum((@. max(abs(ds) * (growth_ratio - 1.0), local_lengths * (2 ^ _mgrid_depth))))
+    """
+    $TYPEDSIGNATURES
 
-                if length(refinement_regions) > 0
-                    ds_refinement = map(
-                        rr -> rr(center), refinement_regions
-                    )
-
-                    Lmax = min(
-                        Lmax,
-                        minimum((@. max(ds_refinement * (growth_ratio - 1.0), refinement_lengths * (2 ^ _mgrid_depth)))),
-                    )
-                end
-
-                Lmax = min(
-                    max_length,
-                    Lmax
-                )
-
-                circumradius = norm(c.widths) / 2
-
-                if L <= Lmax
-                    if minimum(ds) < ghost_layer_ratio * circumradius
-                        return Cell[]
-                    end
-
-                    return [c]
-                end
-
-                if minimum(ds) < (ghost_layer_ratio - 1) * circumradius
-                    return Cell[]
-                end
-
-                new_widths = 0.5 .* c.widths
-                map(
-                    mult -> let new_origin = c.origin .+ new_widths .* mult
-                        new_center = new_origin .+ new_widths ./ 2
-                        ch = Cell(
-                                new_origin, new_widths,
-                                map(ref -> Projection(ref, new_center), surfaces)
-                        )
-
-                        ( # return arguments for next iteration
-                                ch, 
-                                surfaces,
-                                local_lengths,
-                                refinement_regions, refinement_lengths,
-                                growth_ratio,
-                                max_length,
-                                ghost_layer_ratio,
-                                depth + 1,
-                                approximation_ratio,
-                                filter_triangles_every,
-                                _mgrid_depth,
-                        )
-                    end,
-                    Iterators.product(
-                                          fill((0, 1), length(center))...
-                    )
-                ) |> vec
-        end
-
-        """
-        $TYPEDFIELDS
-
-        Struct to define a mesh
-        """
-        struct Mesh
-            origins::Matrix{Float64}
-            widths::Matrix{Float64}
-            centers::Matrix{Float64}
-            boundary_projections::Dict{String, Matrix{Float64}}
-            boundary_in_domain::Dict{String, Vector{Bool}}
-            stereolitographies::Dict{String, Stereolitography}
-        end
-
-        """
-        $TYPEDSIGNATURES
-
-        Split hypercube as per tuple with one integer per dimension.
-        Returns tuples of origin and width vectors for cut hypercubes
-        """
-        function split_hypercube(
-            origin::AbstractVector, widths::AbstractVector,
-            splits::Int...
-        )
-            splits = collect(splits)
-
-            ws = widths ./ splits
-            corners = [
-                collect(
-                    LinRange(
-                        origin[i], origin[i] + widths[i], s + 1
-                    )[1:(end - 1)]
-                ) for (i, s) in enumerate(splits)
-            ]
-
-            [
+    Obtain VTK grid from stereolitography object.
+    Kwargs are saved as point/cell data
+    """
+    function WriteVTK.vtk_grid(
+        fname::String, stl::Stereolitography, vtm_file = nothing;
+        kwargs...
+    )
+        points = stl.points
+        nd = size(points, 1)
+        cells = [
+            MeshCell(
                 (
-                    collect(os), ws
-                ) for os in Iterators.product(corners...)
-            ]
+                    nd == 2 ?
+                    WriteVTK.VTKCellTypes.VTK_LINE :
+                    WriteVTK.VTKCellTypes.VTK_TRIANGLE
+                ), copy(simp)
+            ) for simp in eachcol(stl.simplices)
+        ]
+
+        vtk = nothing
+        if isnothing(vtm_file)
+            vtk = vtk_grid(
+                fname, points, cells
+            )
+        else
+            vtk = vtk_grid(
+                vtm_file, fname, points, cells
+            )
         end
 
-        """
-        $TYPEDSIGNATURES
+        for (k, v) in kwargs
+            if v isa AbstractArray
+                if size(v, ndims(v)) == length(cells) || size(v, ndims(v)) == size(points, 2)
+                    vtk[String(k)] = v
+                else
+                    vtk[String(k)] = permutedims(v)
+                end
+            else
+                vtk[String(k)] = v
+            end
+        end
+
+        vtk
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Merge two (or more) stereolitography objects together according to tolerance
+    """
+    function merge_points(
+        stls::Stereolitography...;
+        tolerance::Real = 1e-7,
+        clean_degenerate::Bool = true,
+    )
+        pt2tag = pt -> tuple(
+            (
+                Int64.(round.(pt ./ tolerance))
+            )...
+        )
+        new_points = Vector{Float64}[]
+
+        nd = size(stls[1].points, 1)
+        tag2ind = Dict{
+            NTuple{nd, Int64}, Int64
+        }()
+        N = 0
+
+        get_index! = pt -> let tag = pt2tag(pt)
+            if haskey(tag2ind, tag)
+                return tag2ind[tag]
+            end
+
+            N += 1
+            tag2ind[tag] = N
+            push!(new_points, pt)
+
+            N
+        end
+
+        new_simplices = Matrix{Int64}[]
+        for stl in stls
+            new_indices = map(
+                get_index!, eachcol(stl.points)
+            )
+
+            push!(
+                new_simplices, 
+                new_indices[stl.simplices]
+            )
+        end
+
+        new_points = reduce(hcat, new_points)
+        new_simplices = reduce(hcat, new_simplices)
+
+        if clean_degenerate
+            mask = map(
+                simp -> let nuniq = unique(simp) |> length
+                    length(simp) == nuniq
+                end, eachcol(new_simplices)
+            )
+
+            new_simplices = new_simplices[:, mask]
+        end
+
+        Stereolitography(new_points, new_simplices)
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    "Concatenate" stereolitography objects into a single
+    struct
+    """
+    Base.cat(
+        stl::Stereolitography...
+    ) = Stereolitography(
+        mapreduce(
+            s -> s.points, hcat, stl
+        ),
+        let n = 0
+            mapreduce(
+                s -> begin
+                    nold = n
+                    n += size(s.points, 2)
+
+                    s.simplices .+ nold
+                end, hcat, stl
+            )
+        end,
+    )
+
+    """
+    Recursive function to split triangle until max. length is met.
+    `refinement_regions` may contain distance-function/local refinement
+    tuples for added rules.
+    """
+    function refine_to_length!(
+        simplex::Matrix{Float64}, h::Real;
+        growth_ratio::Float64 = 1.1,
+        refinement_regions::AbstractVector = []
+    )
+        max_violation = 0.0
+        index = 0
+
+        get_next = i -> (
+            i == size(simplex, 2) ? 1 : i + 1
+        )
+
+        for i = 1:size(simplex, 2)
+            inext = get_next(i)
+
+            p1 = simplex[:, i]
+            p2 = simplex[:, inext]
+            phalf = @. (p1 + p2) / 2
+
+            L = norm(p2 .- p1)
+
+            hloc = h
+            for (df, href) in refinement_regions
+                hloc = min(
+                    h, max(df(phalf) * (growth_ratio - 1.0), href)
+                )
+            end
+
+            violation = L - hloc
+            if max_violation < violation
+                max_violation = violation
+                index = i
+            end
+        end
+
+        if index == 0
+            return [simplex]
+        end
+
+        inext = get_next(index)
+
+        p1 = @view simplex[:, index]
+        p2 = @view simplex[:, inext]
+        pnew = @. (p1 + p2) / 2
+
+        new_simplex = copy(simplex)
+        p2 .= pnew
+        new_simplex[:, index] .= pnew
+
+        [
+            refine_to_length!(simplex, h; 
+                refinement_regions = refinement_regions,
+                growth_ratio = growth_ratio); 
+            refine_to_length!(new_simplex, h; 
+                refinement_regions = refinement_regions,
+                growth_ratio = growth_ratio); 
+        ]
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Split triangles in a stereolitography object until all edges are at most equal to
+    a given length
+    """
+    function refine_to_length(
+        stl::Stereolitography, h::Real;
+        tolerance::Real = 1e-7,
+        growth_ratio::Float64 = 1.1,
+        refinement_regions::AbstractVector = []
+    )
+        stl = begin
+            points = map(
+                simp -> refine_to_length!(
+                    stl.points[:, simp], h;
+                    refinement_regions = refinement_regions,
+                    growth_ratio = growth_ratio,
+                ), eachcol(stl.simplices)
+            ) |> x -> reduce(vcat, x)
+            nd = size(first(points), 2)
+            points = reduce(hcat, points)
+
+            simplices = reshape(
+                collect(1:size(points, 2)), nd, :
+            )
+
+            Stereolitography(points, simplices)
+        end
+
+        merge_points(stl; tolerance = tolerance)
+    end
+
+    """
+    Obtain faces of simplices
+    """
+    simplex_faces(
+        simplex::Matrix{Float64}
+    ) = [
+        let idxs = setdiff(1:size(simplex, 2), i)
+            simplex[:, idxs]
+        end for i = 1:size(simplex, 2)
+    ]
+
+    """
+    Obtain projection of a point upon a simplex
+    """
+    function proj2simplex(
+        simplex::Matrix{Float64}, pt::AbstractVector{Float64}
+    )
+        ϵ = eps(Float64)
+
+        if size(simplex, 2) == 1
+            return vec(simplex)
+        elseif size(simplex, 2) == 2
+            p0 = simplex[:, 1]
+            p1 = simplex[:, 2]
+            u = p1 .- p0
+
+            ξ = (
+                (pt .- p0) ⋅ u
+            ) / (u ⋅ u + ϵ)
+
+            if ξ < - ϵ
+                return p0
+            elseif ξ > 1.0 + ϵ
+                return p1
+            else
+                return p0 .+ u .* ξ
+            end
+        end
+
+        p0 = simplex[:, 1]
+        M = simplex[:, 2:end] .- p0
+
+        ξ = pinv(M) * (pt .- p0)
+
+        if any(
+            xi -> xi < - ϵ, ξ
+        ) || (
+            sum(ξ) > 1.0 + ϵ
+        )
+            p = similar(pt)
+            d = Inf64
+
+            for face in simplex_faces(simplex)
+                _p = proj2simplex(face, pt)
+                _d = norm(_p .- pt)
+
+                if _d < d
+                    d = _d
+                    p .= _p
+                end
+            end
+
+            return p
+        end
+
+        p0 .+ M * ξ
+    end
+
+    """
+    Get simplex normal
+    """
+    function _simplex_normal(simplex::AbstractMatrix{Float64}, normalize::Bool = true)
+
+        ϵ = eps(eltype(simplex))
+
+        if size(simplex, 1) == 2
+            v = simplex[:, 2] .- simplex[:, 1]
+
+            n = [
+                - v[2], v[1]
+            ]
+            if normalize
+                return n ./ (norm(v) + ϵ)
+            else
+                return n
+            end
+        end
+
+        p0 = simplex[:, 1]
+
+        n = cross(simplex[:, 2] .- p0, simplex[:, 3] .- p0)
+
+        if normalize
+            return n ./ (norm(n) + ϵ)
+        end
+
+        n
+
+    end
+
+    _simplex_center(simplex::Matrix{Float64}) = dropdims(
+        sum(simplex; dims = 2); dims = 2
+    ) ./ size(simplex, 2)
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain simplex centers and normals (with norms equal to simplex areas).
+    """
+    function centers_and_normals(stl::Stereolitography)
+
+        simplices = map(
+            simp -> stl.points[:, simp], eachcol(stl.simplices)
+        )
+
+        centers = reduce(
+            hcat,
+            map(
+                _simplex_center, simplices
+            )
+        )
+        normals = reduce(
+            hcat,
+            map(
+                s -> _simplex_normal(s, false), simplices
+            )
+        )
+
+        (centers, normals)
+
+    end
+
+    _face2tag(f::AbstractVector{Int64}) = sort(f) |> f -> tuple(f...)
+
+    """
+    $TYPEDSIGNATURES
+
+    Find simplices that violate minimum radius and maximum normal angle criteria
+    and return them in a new STL object
+    """
+    function feature_regions(stl::Stereolitography;
+        angle::Float64 = 15.0,
+        radius::Float64 = Inf64,
+        include_boundaries::Bool = false)
+        ϵ = eps(Float64)
+        nd = size(stl.points, 1)
+
+        T = NTuple{nd - 1, Int64}
+
+        angle = deg2rad(max(angle, 1.0))
+        max_cos = cosd(0.05)
+
+        edges = Tuple{Int64, Int64}[]
+        registry = Dict{T, Int64}()
+        for (i, simp) in eachcol(stl.simplices) |> enumerate
+            for pivot in simp
+                face = _face2tag(
+                    setdiff(simp, pivot)
+                )
+
+                if haskey(registry, face)
+                    push!(
+                        edges, (registry[face], i)
+                    )
+                    delete!(registry, face)
+                else
+                    registry[face] = i
+                end
+            end
+        end
+
+        # add remaning (border) faces too
+        for (_, ind) in registry
+            push!(edges, (ind, ind))
+        end
+
+        centers, normals = centers_and_normals(stl)
+
+        included_simplices = falses(size(centers, 2))
+        for (i, j) in edges
+            ni = normals[:, i]
+            nj = normals[:, j]
+
+            ni ./= (norm(ni) + ϵ)
+            nj ./= (norm(nj) + ϵ)
+
+            θ = acos(
+                min(ni ⋅ nj, max_cos)
+            )
+            d = norm(centers[:, i] .- centers[:, j])
+
+            if (i == j && include_boundaries) || (d / θ < radius) || (θ > angle)
+                included_simplices[i] = true
+                included_simplices[j] = true
+            end
+        end
+
+        Stereolitography(stl.points, stl.simplices[:, included_simplices])
+    end
+
+    """
+    $TYPEDFIELDS
+
+    Struct to describe an approximate distance field around a stereolitography
+    object.
+    """
+    struct DistanceField
+        stl::Stereolitography
+        centers::Matrix{Float64}
+        tree::KDTree
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Constructor for a distance field.
+    Refinement is applied if max. edge size `h` is provided
+    """
+    function DistanceField(
+        stl::Stereolitography;
+        leaf_size::Int = 25, h::Real = 0.0
+    )
+        if h > 0.0
+            stl = refine_to_length(stl, h)
+        end
+
+        centers, _ = centers_and_normals(stl)
+        tree = KDTree(centers; leafsize = leaf_size)
+
+        DistanceField(stl, centers, tree)
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain approximate distance from distance field
+    """
+    (dist::DistanceField)(x::AbstractVector{Float64}) = nn(
+        dist.tree, x
+    )[2]
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain projection upon surface, given distance field.
+    Searches for simplices with centers within a given range
+    as candidates for projection.
+    """
+    function projection(
+        dist::DistanceField, x::AbstractVector{Float64}, R::Real = 0.0
+    )
+        idx, d = nn(dist.tree, x)
+        p = dist.centers[:, idx]
+
+        if R > 0.0
+            idxs = inrange(dist.tree, x, R)
+
+            for i in idxs
+                simp = dist.stl.points[:, dist.stl.simplices[:, i]]
+
+                _p = proj2simplex(simp, x)
+                _d = norm(_p .- x)
+
+                if _d < d
+                    d = _d
+                    p .= _p
+                end
+            end
+        end
+
+        p
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Refine a cell until all refinement criteria (distance function/size tuples)
+    are met. Includes global growth ratio.
+    Returns vector of tuples, each tuple with an origin vector and a widths vector.
+    The closest possible thing to isotropy is sought.
+    """
+    function refine_octree(
+        refinement_criteria::AbstractVector,
+        origin::Vector{Float64}, widths::Vector{Float64},
+        growth_ratio::Float64 = 1.1
+    )
+        L = maximum(widths)
+        R = norm(widths) / 2 # circumradius
+        center = @. origin + widths / 2
+
+        criteria_is_active = map(
+            t -> let (df, h) = t
+                Lmax = max(
+                    (growth_ratio - 1.0) * (
+                        df(center) - R
+                    ), h
+                )
+
+                (Lmax < L)
+            end, refinement_criteria
+        )
+
+        if !any(criteria_is_active)
+            return [(origin, widths)]
+        end
+
+        refinement_criteria = refinement_criteria[criteria_is_active]
+
+        split_sizes = let wmin = minimum(widths)
+            Int64.(
+                round.(widths ./ wmin)
+            ) .+ 1
+        end
+
+        new_widths = widths ./ split_sizes
+        new_origins = Iterators.product(
+            map(
+                (o, w, s) -> LinRange(o, o + w, s + 1)[1:(end - 1)],
+                origin, widths, split_sizes
+            )...
+        ) |> collect |> vec
+
+        reduce(
+            vcat,
+            map(
+                o -> refine_octree(
+                    refinement_criteria,
+                    collect(o), new_widths,
+                    growth_ratio
+                ), new_origins
+            )
+        )
+    end
+
+    """
+    Run DFS on graph.
+    """
+    function dfs(graph::Vector{Vector{Int64}}, start_node::Int64)::Vector{Int64}
+        # Initialize visited array
+        visited = falses(length(graph))
         
-        Generate an octree/quadtree mesh described by:
+        # Initialize result vector
+        result = Int64[]
+        
+        # Use a stack for iterative DFS
+        stack = Set([start_node])
+        
+        while !isempty(stack)
+            # Pop the top node from the stack
+            node = pop!(stack)
+            
+            if !visited[node]
+                # Mark as visited and add to result
+                visited[node] = true
+                push!(result, node)
+                
+                # Push all unvisited neighbors to the stack
+                for neighbor in graph[node]
+                    if !visited[neighbor]
+                        push!(stack, neighbor)
+                    end
+                end
+            end
+        end
+        
+        return result
+    end
+
+    """
+    $TYPEDFIELDS
+
+    Struct to define a mesh
+    """
+    struct Mesh
+        origins::Matrix{Float64}
+        widths::Matrix{Float64}
+        centers::Matrix{Float64}
+        in_domain::Vector{Bool}
+        family_distances::Dict{String, Vector{Float64}}
+        family_projections::Dict{String, Matrix{Float64}}
+        families::Dict{String, Stereolitography}
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Generate an octree/quadtree mesh described by:
 
         * A hypercube origin;
         * A vector of hypercube widths;
@@ -594,425 +928,463 @@ module Mesher
                 ]
                 ```
         * A cell growth ratio;
-        * A maximum cell size (optional);
-        * A ratio between the cell circumradius and the SDF threshold past which
-            cells are considered to be out of the domain. `ghost_layer_ratio = -2.0` 
-            guarantees that a layer of at least two ghost cell layers are included 
-            within each solid;
-        * A point reference within the domain. If absent, external flow is assumed;
-        * An approximation ratio between wall distance and cell circumradius past which
-            distance functions are approximated;
-        * A number of recursive refinement levels past which the triangles in the provided
-            triangulations are filtered to lighter, local topologies; and
-        * An optional tuple specifying the number of "splits" conducted along each axis
-            before octree splitting. For example, if one has `origin = [1.0, 1.0]`,
-            `widths = [2.0, 3.0]`, one may use `initial_splits = (2, 3)` to maintain isotropy.
+        * An interior point reference, and, along with it, a boundary surface
+            for domain clipping; and
+        * A ghost layer ratio, which defines the thickness of the ghost cell layer
+            within a solid as a ratio of the local cell circumdiameter.
 
-        Farfield boundaries may be defined with the following syntax:
+    Family naming may be implemented by giving the same name string to several surfaces.
+    Surfaces without family names ("", empty strings) will be considered merely
+    a meshing resource, not a boundary.
 
-        ```
-        farfield_boundaries = [
-            "inlet" => [
-                (1, false), # fwd face, first dimension (x)
-                (2, false), # left face, second dimension (y)
-                (2, true), # right face, second dimension (y)
-                (3, false), # bottom face, third dimension (z)
-                (3, true), # top face, third dimension (z)
-            ],
-            "outlet" => [(1, true)]
+    Hypercube boundary family names may be specified by:
+
+    ```
+    hypercube_families = [
+        "inlet" => [
+            (1, false), # back face, x axis
+            (2, true), # front face, y axis
+            (3, false), # bottom face, z axis
+            (3, true) # top face, z axis
+        ],
+        "symmetry" => [
+            (2, false) # left face, y axis
+        ],
+        "outlet" => [
+            (1, true) # front face, x axis
         ]
-        ```
-        """
-        function FixedMesh(
-                origin::Vector{Float64}, widths::Vector{Float64},
-                surfaces::Tuple{String, Stereolitography, Float64}...;
-                refinement_regions::AbstractVector = [],
-                growth_ratio::Float64 = 1.2,
-                max_length::Float64 = Inf,
-                ghost_layer_ratio::Float64 = -2.2,
-                interior_point = nothing,
-                approximation_ratio::Float64 = 2.0,
-                filter_triangles_every::Int64 = 0,
-                verbose::Bool = false,
-                farfield_boundaries = nothing,
-                initial_splits = nothing,
-                _mgrid_depth::Int64 = 0
+    ]
+    ```
+    """
+    function Mesh(
+        origin::Vector{Float64}, widths::Vector{Float64},
+        surfaces::Tuple{String, Stereolitography, Float64}...;
+        interior_reference::Union{Vector{Float64}, Nothing} = nothing,
+        boundary_surface::Union{Stereolitography, Nothing} = nothing,
+        growth_ratio::Float64 = 1.1,
+        ghost_layer_ratio::Float64 = 1.5,
+        refinement_regions = [],
+        hypercube_families = [],
+        merge_tolerance::Real = 1e-7,
+        verbose::Bool = false,
+    )
+        verbose && println("====Starting mesh generation====")
+
+        t0_global = time()
+
+        verbose && println("Adding surface refinement to match volume regions...")
+
+        t0 = time()
+        # refine surfaces to refinement regions and to their own
+        # characteristic lengths
+        surfaces = [
+            (
+                sname,
+                refine_to_length(stl, h;
+                    tolerance = merge_tolerance,
+                    growth_ratio = growth_ratio,
+                    refinement_regions = refinement_regions),
+                h
+            ) for (sname, stl, h) in surfaces
+        ]
+
+        # now add refinement according to the other surfaces
+        let hs = map(t -> t[3], surfaces)
+            asrt = sortperm(hs)
+
+            for (k, i) in enumerate(asrt)
+                stl_i = surfaces[i][2]
+                h = surfaces[i][3]
+                dfield = DistanceField(stl_i)
+
+                for j in asrt[(k + 1):end]
+                    sname, stl, L = surfaces[j]
+
+                    surfaces[j] = (
+                        sname,
+                        refine_to_length(
+                            stl, L;
+                            tolerance = merge_tolerance,
+                            growth_ratio = growth_ratio,
+                            refinement_regions = [
+                                (dfield, h)
+                            ]
+                        ),
+                        L
+                    )
+                end
+            end
+        end
+
+        verbose && println("[DONE] $(time() - t0) seconds elapsed")
+
+        verbose && println("Creating surface approx. distance fields...")
+
+        t0 = time()
+        # create dist. fields and add them to ref. regions
+        distance_fields = DistanceField[] # for re-use
+        refinement_regions = [
+            refinement_regions;
+            [
+                let dfield = DistanceField(stl)
+                    push!(distance_fields, dfield)
+
+                    (dfield, h)
+                end for (
+                    _, stl, h
+                ) in surfaces
+            ]
+        ]
+
+        verbose && println("[DONE] $(time() - t0) seconds elapsed")
+
+        verbose && println("Creating joint surfaces for future family representation...")
+
+        t0 = time()
+        # joining surfaces
+        stl_families = Dict{String, Vector{Stereolitography}}()
+        for (sname, stl, _) in surfaces
+            if length(sname) > 0
+                if !haskey(stl_families, sname)
+                    stl_families[sname] = Stereolitography[]
+                end
+
+                push!(stl_families[sname], stl)
+            end
+        end
+
+        stl_families = Dict(
+            sname => cat(stls...) for (sname, stls) in stl_families
         )
-            bnames = map(p -> p[1], surfaces) |> collect
-            bdries = map(p -> p[2], surfaces) |> collect
-            bdry_lengths = map(p -> p[3], surfaces) |> collect
 
-            all_bnames = copy(bnames)
-            if !isnothing(farfield_boundaries)
-                for (bname, _) in farfield_boundaries
-                    push!(all_bnames, bname)
+        verbose && println("[DONE] $(time() - t0) seconds elapsed")
+
+        verbose && println("Refining octree to distance fields...")
+
+        t0 = time()
+        origins, cell_widths = let cells = refine_octree(
+            refinement_regions,
+            origin, widths, growth_ratio
+        )
+            (
+                map(t -> t[1], cells) |> x -> reduce(hcat, x),
+                map(t -> t[2], cells) |> x -> reduce(hcat, x),
+            )
+        end
+        centers = @. origins + cell_widths / 2
+        ncells = size(centers, 2)
+        nd = size(centers, 1)
+
+        verbose && println("$ncells cells generated")
+
+        verbose && println("[DONE] $(time() - t0) seconds elapsed")
+
+        verbose && println("Calculating cell-family distances...")
+
+        t0 = time()
+        # calculate projs/dists using distance fields
+        family_distances = Dict{String, Vector{Float64}}()
+        family_projections = Dict{String, Matrix{Float64}}()
+
+        radii = sum(
+            cell_widths .^ 2; dims = 1
+        ) |> vec |> x -> sqrt.(x) ./ 2
+
+        # calculating distance to each surface family
+        for ((sname, _, _), dfield) in zip(
+            surfaces, distance_fields
+        )
+            if length(sname) > 0.0 # not only meshing resource
+                if !haskey(family_distances, sname)
+                    family_distances[sname] = fill(Inf64, ncells)
+                    family_projections[sname] = Matrix{Float64}(undef, nd, ncells)
+                end
+
+                dists = family_distances[sname]
+                projs = family_projections[sname]
+
+                for (i, c) in eachcol(centers) |> enumerate
+                    p = projection(
+                        dfield, c, ghost_layer_ratio * 2 * radii[i] # calculate with precision if ghost
+                    )
+                    d = norm(c .- p)
+
+                    if d < dists[i]
+                        dists[i] = d
+                        projs[:, i] .= p
+                    end
+                end
+            end
+        end
+
+        # establish hypercube families
+        for (family, faces) in hypercube_families
+            ps = similar(centers)
+            ds = fill(Inf64, size(centers, 2))
+
+            for (dim, front) in faces
+                projs = copy(centers)
+                projs[dim, :] .= (
+                    front ?
+                    origin[dim] + widths[dim] :
+                    origin[dim]
+                )
+
+                for (i, p) in eachcol(projs) |> enumerate
+                    d = norm(p .- centers[:, i])
+
+                    if d < ds[i]
+                        ds[i] = d
+                        ps[:, i] .= p
+                    end
                 end
             end
 
-            if length(all_bnames) != length(unique(all_bnames))
-                throw(error("Non-unique boundary names in mesh generation"))
-            end
+            family_distances[family] = ds
+            family_projections[family] = ps
+        end
 
-            refs = map(p -> p[1], refinement_regions)
-            ref_lengths = map(p -> p[2], refinement_regions)
+        verbose && println("[DONE] $(time() - t0) seconds elapsed")
 
-            trirefs = map(
-                bdry -> TriReference(bdry; outside_reference = interior_point),
-                bdries
+        # deallocate no-longer-needed variables
+        surfaces = nothing
+        distance_fields = nothing
+        refinement_regions = nothing
+
+        # default
+        in_domain = trues(ncells)
+        ϵ = eps(Float64)
+
+        @assert isnothing(boundary_surface) == isnothing(interior_reference) "Arguments boundary_surface and interior_reference must be used together"
+        if !(
+            isnothing(boundary_surface) || isnothing(interior_reference)
+        )
+            verbose && println("Generating KD-tree...")
+            t0 = time()
+
+            tree = KDTree(centers)
+
+            verbose && println("[DONE] $(time() - t0) seconds elapsed")
+
+            t0 = time()
+            verbose && println("Generating conn. graph...")
+
+            graph = map(
+                (c, r) -> inrange(tree, c, 2.1 * r),
+                eachcol(centers), radii
             )
+            
+            # ensure reciprocity
+            for (i, neighs) in enumerate(graph)
+                for j in neighs
+                    if i != j
+                        jneighs = graph[j]
 
-            origins_and_widths = [
-                (origin, widths)
-            ]
-            if !isnothing(initial_splits)
-                origins_and_widths = split_hypercube(
-                    origin, widths, initial_splits...
-                )
-            end
-
-            args = [
-                (
-                    Cell(
-                        os, ws, 
-                        let center = os .+ ws ./ 2
-                            map(
-                                ref -> Projection(ref, center), trirefs
-                            )
-                        end
-                    ),
-                    trirefs, bdry_lengths,
-                    refs, ref_lengths,
-                                    growth_ratio,
-                                    max_length,
-                                    ghost_layer_ratio,
-                                    1,
-                                    approximation_ratio,
-                                    filter_triangles_every,
-                                    _mgrid_depth,
-                ) for (os, ws) in origins_and_widths
-            ]
-
-            if verbose
-                println("===================")
-                println("Starting iteration for $(length(origin))-D fixed mesh")
-            end
-
-            k = 0
-            while !all(a -> isa(a, Cell), args)
-                k += 1
-                verbose && print("Iteration $k: ")
-
-                args = let rets = Vector{Any}(undef, length(args))
-                    @threads for i = 1:length(args)
-                        if isa(args[i], Cell)
-                            rets[i] = args[i]
-                        else
-                            rets[i] = fixed_mesh_refine(args[i]...)
+                        if !(i in jneighs)
+                            push!(jneighs, i)
                         end
                     end
-                    rets
-                end |> x -> reduce(vcat, x)
-
-                verbose && println("$(length(args)) cells")
+                end
             end
-            verbose && println("Iteration ended!!")
-            verbose && println("===================")
+            for i = length(graph):-1:1
+                neighs = graph[i]
 
-            bdries_proj = Dict(
-                [
-                    bname => map(
-                        c -> c.projections[i].projection, args
-                    ) |> x -> reduce(hcat, x) for (i, bname) in enumerate(bnames)
-                ]...
-            )
-            bdries_in_domain = Dict(
-                [
-                    bname => map(
-                        c -> !(c.projections[i].interior), args
-                    ) for (i, bname) in enumerate(bnames)
-                ]...
-            )
+                for j in neighs
+                    if i != j
+                        jneighs = graph[j]
 
-            # define projections to hypercube boundaries
-            centers = map(c -> c.origin .+ c.widths ./ 2, args) |> x -> reduce(hcat, x)
-            if !isnothing(farfield_boundaries)
-                for (bname, tups) in farfield_boundaries
-                    projs = similar(centers)
-                    dists = fill(Inf64, size(centers, 2))
-
-                    in_domain = trues(size(centers, 2))
-
-                    for (dim, front) in tups
-                        for (i, (c, p)) in zip(eachcol(centers), eachcol(projs)) |> enumerate
-                            _p = copy(c)
-                            if front
-                                _p[dim] = origin[dim] + widths[dim]
-                            else
-                                _p[dim] = origin[dim]
-                            end
-
-                            d = norm(_p .- c)
-
-                            if d < dists[i]
-                                dists[i] = d
-                                p .= _p
-                            end
+                        if !(i in jneighs)
+                            push!(jneighs, i)
                         end
                     end
-
-                    bdries_proj[bname] = projs
-                    bdries_in_domain[bname] = in_domain
                 end
             end
 
-            Mesh(
-                map(c -> c.origin, args) |> x -> reduce(hcat, x),
-                map(c -> c.widths, args) |> x -> reduce(hcat, x),
-                centers,
-                bdries_proj, bdries_in_domain,
-                Dict(
-                     [bn => deepcopy(bd) for (bn, bd) in zip(bnames, bdries)]...
+            # removing connectivity when crossing boundaries
+            for (family, projs) in family_projections
+                dists = family_distances[family]
+
+                for (i, neighs) in enumerate(graph)
+                    c = centers[:, i]
+                    p = projs[:, i]
+                    d = dists[i]
+
+                    normal = c .- p
+                    normal ./= (
+                        norm(normal) + ϵ
+                    )
+
+                    graph[i] = filter(
+                        j -> let cj = centers[:, j]
+                            d + (cj .- c) ⋅ normal > sqrt(ϵ)
+                        end, neighs
+                    )
+                end
+            end
+
+            # making sure that only reciprocal links are found
+            for i = 1:length(graph)
+                graph[i] = filter(
+                    j -> (i == j) || (i in graph[j]), graph[i]
                 )
+            end
+            for i = length(graph):-1:1
+                graph[i] = filter(
+                    j -> (i == j) || (i in graph[j]), graph[i]
+                )
+            end
+
+            verbose && println("[DONE] $(time() - t0) seconds elapsed")
+
+            verbose && println("Running DFS...")
+            t0 = time()
+
+            start_node = argmin(
+                sum(
+                    (centers .- interior_reference) .^ 2; dims = 1
+                ) |> vec
+            )
+
+            is_wet = dfs(graph, start_node)
+
+            in_domain .= false
+            in_domain[is_wet] .= true
+
+            verbose && println("[DONE] $(time() - t0) seconds elapsed")
+        end
+
+        verbose && println("Filtering interior and ghost cells...")
+        t0 = time()
+
+        let mask = falses(ncells)
+            @. mask = mask || in_domain
+
+            for (_, dists) in family_distances
+                is_ghost = @. dists < ghost_layer_ratio * radii * 2
+                @. mask = mask || is_ghost
+            end
+
+            mask = findall(mask)
+
+            origins = origins[:, mask]
+            centers = centers[:, mask]
+            cell_widths = cell_widths[:, mask]
+            in_domain = in_domain[mask]
+            family_distances = Dict(
+                sname => dists[mask] for (sname, dists) in family_distances
+            )
+            family_projections = Dict(
+                sname => projs[:, mask] for (sname, projs) in family_projections
             )
         end
 
-        """
-        $TYPEDSIGNATURES
+        verbose && println("[DONE] $(time() - t0) seconds elapsed")
 
-        Obtain multiple meshes for a multigrid approach, returned from finest to coarsest.
-        The element size ratio between meshes is `2 ^ coarsening_levels`.
+        verbose && println("====$(length(in_domain)) cells in $(time() - t0_global) seconds====")
 
-        All arguments and kwargs are passed to `FixedMesh`.
-        """
-        Multigrid(ngrids::Int64, args...; 
-            coarsening_levels::Int64 = 1,
-            verbose::Bool = false, kwargs...) = map(
-            level -> begin
-                if verbose
-                    println("====Mesh level $level====")
-                end
+        Mesh(
+            origins, cell_widths, centers, in_domain,
+            family_distances, family_projections,
+            stl_families
+        )
+    end
 
-                FixedMesh(args...; kwargs..., 
-                    _mgrid_depth = (level - 1) * coarsening_levels, 
-                    verbose = verbose)
-            end,
-            1:ngrids
+    """
+    $TYPEDSIGNATURES
+
+    Write cells to VTK file. Kwargs are written as cell data.
+
+    If `write_families = true`, name `fname * "_" * fam_name` is used
+    for each surface family .vtu file. Saving is automatic.
+    """
+    function WriteVTK.vtk_grid(
+        fname::String, msh::Mesh; 
+        write_families::Bool = false,
+        kwargs...
+    )
+        nd = size(msh.origins, 1)
+        ncorners = 2 ^ nd
+
+        ctype = (
+            nd == 2 ? VTKCellTypes.VTK_PIXEL : VTKCellTypes.VTK_VOXEL
         )
 
-        """
-        $TYPEDSIGNATURES
-
-        Write cells to VTK file. Kwargs are written as cell data
-        """
-        function WriteVTK.vtk_grid(
-            fname::String, msh::Mesh; kwargs...
+        multipliers = mapreduce(
+            collect, hcat,
+            Iterators.product(
+                fill((0, 1), nd)...
+            )
         )
-            nd = size(msh.origins, 1)
-            ncorners = 2 ^ nd
 
-            ctype = (
-                nd == 2 ? VTKCellTypes.VTK_PIXEL : VTKCellTypes.VTK_VOXEL
+        points = map(
+            (o, w) -> multipliers .* w .+ o,
+            eachcol(msh.origins), eachcol(msh.widths)
+        ) |> x -> reduce(hcat, x)
+
+        mcells = MeshCell[]
+        _conn = collect(1:ncorners)
+        for k = 1:size(msh.centers, 2)
+            conn = _conn .+ ((k - 1) * ncorners)
+
+            push!(
+                mcells,
+                MeshCell(ctype, conn)
             )
+        end
 
-            multipliers = mapreduce(
-                collect, hcat,
-                Iterators.product(
-                    fill((0, 1), nd)...
-                )
-            )
-
-            points = map(
-                (o, w) -> multipliers .* w .+ o,
-                eachcol(msh.origins), eachcol(msh.widths)
-            ) |> x -> reduce(hcat, x)
-
-            mcells = MeshCell[]
-            _conn = collect(1:ncorners)
-            for k = 1:size(msh.centers, 2)
-                conn = _conn .+ ((k - 1) * ncorners)
-
-                push!(
-                    mcells,
-                    MeshCell(ctype, conn)
-                )
-            end
-
-            grid = vtk_grid(fname, points, mcells)
-            for (k, v) in kwargs
+        grid = vtk_grid(fname, points, mcells)
+        for (k, v) in kwargs
+            if v isa AbstractArray
                 if size(v, ndims(v)) == length(mcells)
                     grid[String(k)] = v
+                else
+                    grid[String(k)] = permutedims(v)
                 end
+            else
+                grid[String(k)] = v
             end
-
-            grid
         end
 
-        """
-        $TYPEDSIGNATURES
+        grid["in_domain"] = Float64.(msh.in_domain)
+        for family in keys(msh.family_distances)
+            grid[family * "_distances"] = msh.family_distances[family]
+            grid[family * "_projections"] = msh.family_projections[family]
+        end
 
-        Get number of cells in mesh
-        """
-        Base.length(msh::Mesh) = size(msh.centers, 2)
-
-        """
-        $TYPEDSIGNATURES
-
-        Save mesh to .json format
-        """
-        mesh2json(fname::String, msh::Mesh) = let fobj = open(fname, "w")
-            let nt = (
-                origins = msh.origins,
-                widths = msh.widths,
-                centers = msh.centers,
-                boundary_projections = msh.boundary_projections,
-                boundary_in_domain = Dict(
-                    [k => Int64.(v) for (k, v) in msh.boundary_in_domain]...
-                ),
-                stereolitographies = Dict(
-                                          [k => Dict(
-                                                     ["points" => v.points, "simplices" =>v.simplices]...
-                                          ) for (k, v) in msh.stereolitographies]...
+        if write_families
+            for (sname, stl) in msh.families
+                vtk = vtk_grid(
+                    fname * "_" * sname, stl
                 )
-            )
-                json = JSON.json(nt)
-
-                print(fobj, json)
+                vtk_save(vtk)
             end
         end
 
-        """
-        $TYPEDSIGNATURES
+        grid
+    end
 
-        Recover mesh from .json format
-        """
-        json2mesh(fname::String) = let d = JSON.parsefile(fname)
-            Mesh(
-                d["origins"] |> x -> reduce(hcat, x),
-                d["widths"] |> x -> reduce(hcat, x),
-                d["centers"] |> x -> reduce(hcat, x),
-                Dict(
-                    [k => reduce(hcat, v) for (k, v) in d["boundary_projections"]]...
-                ), Dict(
-                    [k => Bool.(v) for (k, v) in d["boundary_in_domain"]]...
-                ), Dict(
-                    [k => Stereolitography(
-                                           reduce(hcat, v["points"]) |> x -> Float64.(x), 
-                                           reduce(hcat, v["simplices"]) |> x -> Int64.(x)
-                           ) for (k, v) in d["stereolitographies"]]...
-                )
-            )
-        end
+    """
+    $TYPEDSIGNATURES
 
-        """
-        $TYPEDSIGNATURES
+    Get mesh size
+    """
+    Base.length(msh::Mesh) = size(msh.centers, 2)
 
-        Obtain distance between a set of boxes (cells) and
-        another box, both identified by origins and widths.
-        """
-        dist2box(
-            origins::AbstractMatrix, widths::AbstractMatrix,
-            o::AbstractVector, w::AbstractVector;
-            fringe::Bool = true
-        ) = (
-            @. max(
-                abs((origins + widths / 2) - (o + w / 2)) - (
-                    w + widths
-                ) / 2 + (1 - 2 * fringe) * min(
-                    widths, w
-                ) * 1e-5,
-                0.0
-            ) ^ 2
-        ) |> eachrow |> sum |> x -> sqrt.(x)
+    """
+    $TYPEDSIGNATURES
 
-        """
-        $TYPEDSIGNATURES
-
-        Obtain subdivisions of a mesh based on octree splitting.
-
-        Returns a vector of index vectors, each indicating a partition. 
-        You may use getindex via `msh[partitions(msh)[10]]`, for example, to obtain a 
-        partition as a `Mesh` struct.
-
-        Each partition includes the cells contained in or adjacent to a given hypercube.
-        Using `fringe = false` removes the adjacent cells.
-        """
-        function partition(msh::Mesh, max_size::Int64; 
-            fringe::Bool = true,
-            include_empty::Bool = false)
-            origin = map(
-                minimum, eachrow(msh.origins)
-            )
-            widths = map(
-                maximum, eachrow(msh.origins .+ msh.widths)
-            ) .- origin
-
-            cubes = [(origin, widths)]
-            parts = [
-                collect(1:size(msh.centers, 2))
-            ]
-
-            while !all(p -> length(p) <= max_size, parts)
-                new_cubes = []
-                new_parts = []
-
-                for i = 1:length(parts)
-                    part = parts[i]
-                    origin, widths = cubes[i]
-
-                    if length(part) > max_size
-                        os = view(msh.origins, :, part)
-                        ws = view(msh.widths, :, part)
-
-                        for mult in Iterators.product(
-                                            fill((0, 1), length(origin))...
-                        )
-                            o = origin .+ (widths .* mult) ./ 2
-                            w = widths ./ 2
-
-                            isval = dist2box(
-                                os, ws, o, w;
-                                fringe = fringe
-                            ) .<= eps(eltype(o))
-
-                            if include_empty || any(isval)
-                                push!(new_cubes, (o, w))
-                                push!(new_parts, part[isval])
-                            end
-                        end
-                    else
-                        if include_empty || length(part) > 0
-                            push!(new_cubes, (origin, widths))
-                            push!(new_parts, part)
-                        end
-                    end
-                end
-
-                cubes = new_cubes
-                parts = new_parts
-            end
-
-            parts
-        end
-
-        """
-        $TYPEDSIGNATURES
-
-        Given an array of cell indices indicating a partition, 
-        return the `Mesh` struct corresponding to selected cells, only
-        """
-        Base.getindex(msh::Mesh, part::AbstractVector) = Mesh(
-            msh.origins[:, part], msh.widths[:, part], msh.centers[:, part],
-            Dict(
-                [
-                    k => v[:, part] for (k, v) in msh.boundary_projections
-                ]...
-            ),
-            Dict(
-                [
-                    k => v[part] for (k, v) in msh.boundary_in_domain
-                ]...
-            ),
-            msh.stereolitographies
-        )
+    Obtain partition of a mesh based on cell indices
+    """
+    Base.getindex(msh::Mesh, idxs) = Mesh(
+        msh.origins[:, idxs], msh.widths[:, idxs],
+        msh.centers[:, idxs], msh.in_domain[idxs],
+        Dict(
+            [fam => dists[idxs] for (fam, dists) in msh.family_distances]
+        ),
+        Dict(
+            [fam => projs[:, idxs] for (fam, projs) in msh.family_projections]
+        ),
+        msh.families
+    )
 
 end
