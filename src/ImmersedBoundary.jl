@@ -886,7 +886,7 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Auxiliary function for `-∇⋅(μ ∇ϕ)`.
+    Auxiliary function for `∇⋅(μ ∇ϕ)`.
     """
     function dissipation(
         part::Partition, μ::Union{Real, AbstractVector}, ϕ::AbstractArray
