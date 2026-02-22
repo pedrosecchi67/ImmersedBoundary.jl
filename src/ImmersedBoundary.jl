@@ -889,7 +889,7 @@ module ImmersedBoundary
     Auxiliary function for `-∇⋅(μ ∇ϕ)`.
     """
     function dissipation(
-        part::Partition, μ::Union{Real, AbstractMatrix}, ϕ::AbstractArray
+        part::Partition, μ::Union{Real, AbstractVector}, ϕ::AbstractArray
     )
         div = similar(ϕ)
         div .= 0.0
