@@ -5,7 +5,7 @@ module NNInterpolator
     using LinearAlgebra
     using NearestNeighbors
 
-    export Interpolator, KDTree
+    export Interpolator, KDTree, Multigrid
 
     module ArrayAccumulator
 
@@ -298,6 +298,194 @@ module NNInterpolator
                 i -> hmap[i], stencil
             )
         end
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain coarsener and prolongator operators for the n-th grid level.
+    The original grid points are re-sampled by selecting every `2^N`-th point,
+    if `N` is the spatial dimensionality.
+
+    Optionally, a cell volume for each grid point may be provided.
+    """
+    function coarsener_and_prolongator(
+        X::AbstractMatrix, n::Int64, volumes::Union{AbstractVector, Nothing} = nothing;
+        first_index::Bool = false, 
+        linear::Bool = false,
+        k::Int = 0,
+    )
+        X_for_tree = X
+        if first_index
+            X_for_tree = permutedims(X_for_tree)
+        end
+
+        if isnothing(volumes)
+            volumes = similar(X_for_tree, (size(X_for_tree, 2),))
+            volumes .= 1.0
+        end
+
+        N = size(X_for_tree, 1)
+        Xc = selectdim(
+            X,
+            (first_index ? 1 : 2),
+            1:(2 ^ (N * n)):size(X_for_tree, 2)
+        )
+
+        Xc_for_tree = Xc
+        if first_index
+            Xc_for_tree = permutedims(Xc_for_tree)
+        end
+
+        tree_coarse = KDTree(Xc_for_tree)
+
+        idxs, _ = nn(tree_coarse, X_for_tree)
+
+        # build coarsener based on closest clusters
+        stencils = [
+            Int64[] for i = 1:size(Xc_for_tree, 2)
+        ]
+        for (k, i) in enumerate(idxs)
+            push!(stencils[i], k)
+        end
+
+        weights = [
+            let v = @view volumes[i]
+                v ./ sum(v)
+            end for i in stencils
+        ]
+
+        coarsener = Accumulator(stencils, weights;
+            first_index = first_index)
+
+        prolongator = Interpolator(
+            Xc, X, tree_coarse;
+            first_index = first_index, linear = linear, k = k,
+        )
+
+        (coarsener, prolongator)
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Function to perform under-relaxation upon a given grid, given coarsener and prolongator
+    from the finest grid. If not provided, the system is under-relaxed at the current level.
+
+    Returns proposed corrections to `v` and the corresponding variations to `r`.
+    """
+    function underrelax(
+        J, r::AbstractArray,
+        coarsener = identity, prolongator = identity
+    )
+        e = eps(eltype(r))
+        v = r ./ (norm(r) .+ e) |> coarsener |> prolongator
+
+        Jv = J(v)
+        Jvc = coarsener(Jv)
+        rc = coarsener(r)
+
+        a = (
+            dot(Jvc, rc) / (
+                dot(Jvc, Jvc) + e
+            )
+        )
+        (
+            - v .* a,
+            - Jv .* a,
+        )
+    end
+
+    """
+    $TYPEDFIELDS
+
+    Struct holding multigrid levels.
+    """
+    struct Multigrid
+        coarseners::AbstractVector{Accumulator}
+        prolongators::AbstractVector{Accumulator}
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Constructor for a multigrid struct with `n_levels` levels. 
+
+    The original grid points are re-sampled by selecting every `2^N`-th point,
+    if `N` is the spatial dimensionality.
+
+    Optionally, a cell volume for each grid point may be provided.
+    """
+    function Multigrid(
+        X::AbstractMatrix, n_levels::Int64, volumes::Union{AbstractVector, Nothing} = nothing;
+        first_index::Bool = false, 
+        linear::Bool = false,
+        k::Int = 0,
+    )
+        coarseners = Accumulator[]
+        prolongators = Accumulator[]
+
+        for n = 1:n_levels
+            c, p = coarsener_and_prolongator(X, n, volumes;
+                first_index = first_index, linear = linear, k = k)
+
+            push!(coarseners, c)
+            push!(prolongators, p)
+        end
+
+        Multigrid(coarseners, prolongators)
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Run `n_cycles` M-cycles on multigrid levels to solve Newton-Rhapson system.
+
+    Uses Jacobian-free finite difference step `h`. Returns correction to `x`, 
+    final linear system residuals and residual norm reduction factor.
+    """
+    function (mgrid::Multigrid)(
+        f, x::AbstractArray; 
+        n_cycles::Int = 1000,
+        rtol::Real = 0.01, atol::Real = 1e-7,
+        h::Real = 1e-6,
+    )
+        n_levels = mgrid.coarseners |> length
+
+        r0 = f(x)
+        r = copy(r0)
+
+        s = similar(r)
+        s .= 0.0
+
+        J = v -> (f(x .+ v .* h) .- r0) ./ h
+
+        nr0 = norm(r0)
+        for _ = 1:n_cycles
+            nr = norm(r)
+            if nr < max(atol, rtol * nr0)
+                break
+            end
+
+            ds, dr = underrelax(J, r)
+            s .+= ds
+            r .+= dr
+            
+            for i = [
+                1:n_levels; (n_levels-1):-1:1
+            ]
+                ds, dr = underrelax(J, r, mgrid.coarseners[i], mgrid.prolongators[i])
+                s .+= ds
+                r .+= dr
+            end
+
+            ds, dr = underrelax(J, r)
+            s .+= ds
+            r .+= dr
+        end
+        rf = norm(r) / (nr0 + eps(eltype(r0)))
+
+        s, r, rf
     end
 
 end

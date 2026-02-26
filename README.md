@@ -142,7 +142,8 @@ hypercube_families = [
 function Domain(
     msh::Mesh;
     stencil = nothing,
-    max_partition_size::Int = 1000_000,
+    max_partition_size::Int = 100_000,
+    multigrid_levels::Int = 0,
     ghost_layer_ratio::Real = 1.5,
 )
 ```
@@ -322,6 +323,77 @@ struct Boundary
     image_distances::AbstractVector{Float64}
     image_interpolator::NNInterpolator.Accumulator
 end
+```
+
+# Newton-Rhapson and multigrid
+
+To run some iterations of a multigrid solution algorithm on a linear problem,
+one may use function `newton_rhapson`:
+
+```julia
+function newton_rhapson(
+    f, domain::Domain, Q::AbstractArray, args::AbstractArray...;
+    n_cycles::Int = 1000,
+    rtol::Real = 0.01, atol::Real = 1e-7,
+    h::Real = 1e-7,
+    kwargs...
+)
+```
+
+Run an iteration of Newton-Rhapson method
+on all partitions and return the assembled array of corrections
+for `Q`. 
+
+Function `f` should have format:
+
+```julia
+r = f(domain, Q, args...; kwargs...)
+```
+    
+Also returns array of final linear system residuals
+and the residual norm reduction factor achieved.
+
+Runs `n_cycles` multigrid cycles.
+
+`args` and `kwargs` are passed to function call.
+
+Example for Laplace's equation in 2D:
+
+$$
+r = \nabla ^ 2 u = 0
+$$
+
+```julia
+dom = Domain(msh;
+    multigrid_levels = 4)
+
+u = zeros(length(dom))
+
+du, _, _ = newton_rhapson(
+    dom, u
+) do domain, u
+    r = similar(u)
+    r .= 0.0
+
+    domain(u, r) do part, u, r
+        r .= ∇(part, ∇(part, u, 1), 1) .+ ∇(part, ∇(part, u, 2), 2)
+
+        # impose BCs
+        impose_bc!(part, "lower", r, u) do bdry, r, u
+            rb = @. (0.0 - u)
+
+            rb
+        end
+        impose_bc!(part, "upper", r, u) do bdry, r, u
+            rb = @. (1.0 - u)
+
+            rb
+        end
+    end
+
+    r
+end
+u .+= du
 ```
 
 # Postprocessing with surfaces
