@@ -379,7 +379,7 @@ module NNInterpolator
         coarsener = identity, prolongator = identity
     )
         e = eps(eltype(r))
-        v = r ./ (norm(r) .+ e) |> coarsener |> prolongator
+        v = r |> coarsener |> prolongator
 
         Jv = J(v)
         Jvc = coarsener(Jv)
