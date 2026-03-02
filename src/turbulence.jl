@@ -93,12 +93,13 @@ module Turbulence
         while yps[end] < y⁺_max
             yp = yps[end]
             μ⁺ = κ * yp * (1.0 - exp(- yp / A)) ^ 2
+            du!dy = 1.0 / (μ⁺ + 1.0)
 
             push!(
                 yps, yp + h
             )
             push!(
-                ups, ups[end] + h / (μ⁺ + 1.0)
+                ups, ups[end] + h * du!dy
             )
 
             if yp > constant_layer_y⁺
@@ -118,7 +119,7 @@ module Turbulence
     """
     $TYPEDSIGNATURES
 
-    Obtain named tuple with `y⁺, u⁺, μ⁺, k⁺` given a set of `Rey` values 
+    Obtain named tuple with `y⁺, u⁺, μ⁺, k⁺, du⁺!dy⁺` given a set of `Rey` values 
     (Reynolds number in respect to local, laminar viscosity and the `y` 
     position of the first cell center).
     """
@@ -135,6 +136,7 @@ module Turbulence
 
         # from van Driest
         μ⁺ = @. wf.κ * y⁺ * (1.0 - exp(- y⁺ / wf.A)) ^ 2
+        du⁺!dy⁺ = @. 1.0 / (1.0 + μ⁺)
 
         # from Nakagawa-Nezu
         k⁺ = @. min(
@@ -149,13 +151,14 @@ module Turbulence
             u⁺ = u⁺, 
             μ⁺ = μ⁺,
             k⁺ = k⁺,
+            du⁺!dy⁺ = du⁺!dy⁺,
         )
     end
 
     """
     $TYPEDSIGNATURES
 
-    Obtain named tuple with `uτ, νₜ, k, ω, ϵ` given a set of `y, u, ν` values 
+    Obtain named tuple with `uτ, νₜ, k, ω, ϵ, du!dn` given a set of `y, u, ν` values 
     """
     function (wf::WallFunction)(
         y::AbstractVector, u::AbstractVector, ν::AbstractVector
@@ -169,12 +172,15 @@ module Turbulence
         ω = k ./ νₜ
         ϵ = @. wf.βstar * ω * k
 
+        du!dn = @. nt.du⁺!dy⁺ * uτ ^ 2 / ν
+
         (
             uτ = uτ,
             νₜ = νₜ,
             k = k,
             ω = ω,
-            ϵ = ϵ
+            ϵ = ϵ,
+            du!dn = du!dn,
         )
     end
 
