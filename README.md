@@ -478,6 +478,11 @@ TimeAverage
 using ImmersedBoundary.Turbulence
 
 WallFunction
+
+using ImmersedBoundary.IBL
+
+m_closure
+θ_closure
 ```
 
 # Custom array backends/GPUs

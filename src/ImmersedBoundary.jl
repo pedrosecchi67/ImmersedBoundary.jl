@@ -990,4 +990,7 @@ module ImmersedBoundary
     include("turbulence.jl")
     using .Turbulence
 
+    include("ibl.jl")
+    using .IBL
+
 end
