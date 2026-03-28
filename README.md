@@ -322,6 +322,19 @@ struct Boundary
     ghost_distances::AbstractVector{Float64}
     image_distances::AbstractVector{Float64}
     image_interpolator::NNInterpolator.Accumulator
+    boundary_interpolator::NNInterpolator.Accumulator
+end
+```
+
+You can also obtain the values of field properties at the exact boundary
+projection of each ghost cell by using the boundary as a callable object:
+
+```julia
+impose_bc!(part, "family", u) do bdry, u_at_image
+    u_at_boundary = bdry(u) # note that the full array, not the image interpolation,
+    # is the input
+
+    unew
 end
 ```
 

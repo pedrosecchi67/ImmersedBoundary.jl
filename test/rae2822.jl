@@ -108,9 +108,11 @@ for _ = 1:2000
             wall(P, bdry.normals)
         end
 
-        impose_bc!(part, "wall", k) do bdry, k
-            kb = similar(k)
+        impose_bc!(part, "wall", k) do bdry, ki
+            kb = similar(ki)
             kb .= 1.0
+
+            k_at_bdry = bdry(k)
 
             kb
         end

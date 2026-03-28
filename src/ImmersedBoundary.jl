@@ -26,6 +26,7 @@ module ImmersedBoundary
         ghost_distances::AbstractVector{Float64}
         image_distances::AbstractVector{Float64}
         image_interpolator::NNInterpolator.Accumulator
+        boundary_interpolator::NNInterpolator.Accumulator
     end
 
     """
@@ -77,6 +78,10 @@ module ImmersedBoundary
             image_distances,
             Interpolator(
                 centers, projections .+ image_distances .* normals, tree;
+                linear = true, first_index = true
+            ),
+            Interpolator(
+                centers, projections, tree;
                 linear = true, first_index = true
             ),
         )
@@ -365,6 +370,13 @@ module ImmersedBoundary
             end
         end
     end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain value of array at boundary projection points.
+    """
+    (bdry::Boundary)(u::AbstractArray) = bdry.boundary_interpolator(u)
 
     """
     $TYPEDFIELDS
