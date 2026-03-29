@@ -73,16 +73,19 @@ module Turbulence
     and Nezu and Nakagawa's expressions for it in the log-law region.
     Van Driest's approximation for `μ⁺` is used via differential equations
     to calculate an interpolated solution for `y⁺`.
+
+    Wake function `g` is calculated as per a squared-cosinoidal wake layer profile.
     """
     function WallFunction(
         ; 
         h0::Float64 = 0.01, 
         growth_ratio::Float64 = 1.05,
-        y⁺_max::Float64 = 30000.0,
+        y⁺_max::Float64 = 10000.0,
         constant_layer_y⁺::Float64 = 15.0,
         κ::Float64 = 0.41, A::Float64 = 19.0,
         β::Float64 = 0.075, βstar::Float64 = 0.09,
         D::Float64 = 4.2, A⁺::Float64 = 360.0,
+        Cf_max::Float64 = 0.01,
     )
         h = h0
 
@@ -107,6 +110,13 @@ module Turbulence
             end
         end
 
+        g = @. sin(
+            yps / y⁺_max * π / 2
+        ) ^ 2
+        upmax = ups[end] + sqrt(2.0 / Cf_max)
+
+        @. ups = g * upmax + (1.0 - g) * ups
+
         Rey = @. ups * yps
 
         WallFunction(
@@ -128,8 +138,9 @@ module Turbulence
         Rey = @. clamp(abs(Rey), ϵ, Inf64)
 
         # interpolated from previous diff. equation solution
+        log10Rey = log10.(Rey)
         y⁺ = 10.0 .^ linear_interpolation(
-            log10.(Rey), wf.log10Rey, wf.log10y⁺
+            log10Rey, wf.log10Rey, wf.log10y⁺
         )
         
         u⁺ = Rey ./ y⁺
