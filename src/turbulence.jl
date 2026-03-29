@@ -184,4 +184,44 @@ module Turbulence
         )
     end
 
+    export Smagorinsky_νSGS
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain `νSGS` as per the Smagorinsky turbulence model.
+    
+    Uses `νSGS = (CₛΔ)²|S|` for 3D, or `νSGS = (CₛΔ)²|ω|` for 2D.
+
+    `velocity_gradient` is a matrix such that `velocity_gradient[i, j]`
+    indicates the gradient of vel. component `i` along dimension `j`.
+    """
+    function Smagorinsky_νSGS(
+        Δ::AbstractVector, velocity_gradient::AbstractMatrix;
+        Cₛ::Real = 0.17,
+    )
+        if size(velocity_gradient, 1) == 2 # 2D
+            ω = (
+                velocity_gradient[1, 1] .* velocity_gradient[2, 2] .- 
+                velocity_gradient[2, 1] .* velocity_gradient[1, 2]
+            )
+
+            return (
+                @. (Cₛ * Δ) ^ 2 * abs(ω)
+            )
+        end
+
+        SijSij = similar(Δ)
+        SijSij .= 0.0
+        for i = 1:size(velocity_gradient, 1)
+            for j = 1:size(velocity_gradient, 2)
+                SijSij .+= (
+                    (velocity_gradient[i, j] .+ velocity_gradient[j, i]) ./ 2
+                ) .^ 2
+            end
+        end
+
+        @. (Cₛ * Δ) ^ 2 * sqrt(2 * SijSij)
+    end
+
 end
