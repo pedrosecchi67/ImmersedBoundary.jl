@@ -44,7 +44,7 @@ wall = FlowBC(
 
 k = zeros(length(dom))
 
-for _ = 1:2000
+for _ = 1:1000
     dt = dom(P) do part, P
         dt = Inf64
 
@@ -122,12 +122,16 @@ end
 p, T, u, v = eachcol(P)
 Cp = pressure_coefficient(fluid, p, P∞[1], M∞)
 
-dom = Domain(msh;
-    max_partition_size = length(msh) ÷ 2)
+uvdiv = similar(p)
+uvdiv .= 0.0
+dom(uvdiv, P[:, 3:end]) do part, uvdiv, uv
+    uvdiv .= divergent(part, uv)
+end
 
 export_vtk(
     "rae2822", dom;
     p = p, T = T, uv = [u v], Cp = Cp, k = k,
+    uvdiv = uvdiv
 )
 
 end

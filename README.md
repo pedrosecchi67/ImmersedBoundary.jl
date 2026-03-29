@@ -259,6 +259,7 @@ laplacian_smoothing
 stencil_average
 advection
 dissipation
+divergent
 ```
 
 # Boundary conditions

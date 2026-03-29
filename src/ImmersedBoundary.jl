@@ -901,6 +901,63 @@ module ImmersedBoundary
         mdiv
     end
 
+    export divergent
+
+    """
+    $TYPEDSIGNATURES
+
+    Auxiliary function for `-∇⋅u`.
+    Uses upwinding (`order = 1`) or linear-upwinding with MUSCL (`order = 2`).
+    """
+    function divergent(
+        part::Partition, u::AbstractMatrix;
+        order::Int = 2,
+    )
+        mdiv = similar(u, (size(u, 1),))
+        mdiv .= 0.0
+
+        for dim = 1:size(u, 2)
+            v = @view u[:, dim]
+            h = @view part.spacing[:, dim]
+
+            vLim12 = vRim12 = vLip12 = vRip12 = nothing
+            if order == 1
+                vLim12 = getalong(part, v, dim, -1)
+                vRim12 = v
+                vLip12 = v
+                vRip12 = getalong(part, v, dim, 1)
+            elseif order == 2
+                vim2 = getalong(part, v, dim, -2)
+                vim1 = getalong(part, v, dim, -1)
+                vip1 = getalong(part, v, dim, 1)
+                vip2 = getalong(part, v, dim, 2)
+
+                _, vLim12 = MUSCL(vim2, vim1, v)
+                vRim12, vLip12 = MUSCL(vim1, v, vip1)
+                vRip12, _ = MUSCL(v, vip1, vip2)
+            else
+                throw(error("Order $order unsupported for divergent"))
+            end
+
+            up_ip12 = @. (vLip12 + vRip12) / 2 >= 0.0
+            up_im12 = @. (vLim12 + vRim12) / 2 >= 0.0
+
+            # Godunov: no flow if in opposite directions
+            has_flow_ip12 = @. !((vLip12 < 0.0) && (vRip12 > 0.0))
+            has_flow_im12 = @. !((vLim12 < 0.0) && (vRim12 > 0.0))
+            
+            @. mdiv += (
+                (
+                    up_ip12 * vLip12 + (1 - up_ip12) * vRip12
+                ) * has_flow_ip12 - (
+                    up_im12 * vLim12 + (1 - up_im12) * vRim12
+                ) * has_flow_im12
+            ) / h
+        end
+
+        mdiv
+    end
+
     export dissipation
 
     """
