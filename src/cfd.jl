@@ -208,7 +208,9 @@ module CFD
             slip_wall(
                 P, bdry.normals;
                 du!dn = du!dn,
-                image_distances = bdry.image_distances
+                image_distances = bdry.image_distances,
+                transpiration = transpiration # optional: also add transpiration velocity
+                # for IBL models
             )
         end
 
@@ -240,6 +242,7 @@ module CFD
         P::AbstractMatrix, normals::AbstractMatrix;
         image_distances::Union{Nothing, AbstractVector} = nothing,
         du!dn::Union{Nothing, AbstractVector} = nothing,
+        transpiration::Union{Float64, AbstractVector} = 0.0,
     )
         p∞ = bc.P[1]
         T∞ = bc.P[2]
@@ -274,7 +277,7 @@ module CFD
         ub = nothing
         if bc.normal_flow
             ub = u .+ normals .* (
-                un .- current_un
+                un .- current_un .+ transpiration
             )
         else
             ub = (@. un < 0.0) .* u .+ (@. un >= 0.0) .* u∞'
