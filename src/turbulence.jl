@@ -202,8 +202,7 @@ module Turbulence
     )
         if size(velocity_gradient, 1) == 2 # 2D
             ω = (
-                velocity_gradient[1, 1] .* velocity_gradient[2, 2] .- 
-                velocity_gradient[2, 1] .* velocity_gradient[1, 2]
+                velocity_gradient[2, 1] .- velocity_gradient[1, 2]
             )
 
             return (
