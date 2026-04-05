@@ -27,7 +27,7 @@ freestream_bc = FlowBC(
 )
 
 msh = Mesh(
-    [0.0, 0.0], [1.0, 0.1],
+    [0.0, 0.0], [1.0, 1.0],
     ("wall", wall_stl, h);
     hypercube_families = [
         "farfield" => [
@@ -44,7 +44,9 @@ P = repeat(
     P∞'; inner = (length(dom), 1)
 )
 
-Pavg = TimeAverage(0.5)
+Pavg = TimeAverage(1.0)
+
+CTUs = 0.0
 
 march! = () -> begin
     dt = dom(P) do part, P
@@ -140,18 +142,18 @@ march! = () -> begin
 
     dt̄ = dt * V∞ / 1.0
 
-    push!(Pavg, P, dt̄)
+    if CTUs > 1.0
+        push!(Pavg, P, dt̄)
+    end
 
     dt̄
 end
-
-CTUs = 0.0
 
 nit = 0
 
 println("Iteration\tCTUs")
 
-while CTUs < 2.0 && nit < 1_000_000
+while CTUs < 5.0 && nit < 1_000_000
     global nit, CTUs
 
     nit += 1
