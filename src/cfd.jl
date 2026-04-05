@@ -520,7 +520,7 @@ module CFD
     """
     $TYPEDSIGNATURES
 
-    Obtain inviscid fluxes given a fluid, primitive variables and primitive variable gradients
+    Obtain viscous fluxes given a fluid, primitive variables and primitive variable gradients
     (a vector of matrices, with each matrix corresponding to the gradient along one axis).
     Returns fluxes along all Cartesian dimensions.
 
