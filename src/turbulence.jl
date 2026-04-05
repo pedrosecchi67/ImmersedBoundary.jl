@@ -195,21 +195,18 @@ module Turbulence
         )
     end
 
-    export Smagorinsky_νSGS
+    export shear_rate
 
     """
     $TYPEDSIGNATURES
 
-    Obtain `νSGS` as per the Smagorinsky turbulence model.
-    
-    Uses `νSGS = (CₛΔ)²|S|` for 3D, or `νSGS = (CₛΔ)²|ω|` for 2D.
+    Obtain `sqrt(2 * SijSij)` for 3D or `abs(ω)` for 2D.
 
     `velocity_gradient` is a matrix such that `velocity_gradient[i, j]`
     indicates the gradient of vel. component `i` along dimension `j`.
     """
-    function Smagorinsky_νSGS(
-        Δ::AbstractVector, velocity_gradient::AbstractMatrix;
-        Cₛ::Real = 0.17,
+    function shear_rate(
+        velocity_gradient::AbstractMatrix
     )
         if size(velocity_gradient, 1) == 2 # 2D
             ω = (
@@ -217,11 +214,11 @@ module Turbulence
             )
 
             return (
-                @. (Cₛ * Δ) ^ 2 * abs(ω)
+                @. abs(ω)
             )
         end
 
-        SijSij = similar(Δ)
+        SijSij = similar(velocity_gradient[1, 1])
         SijSij .= 0.0
         for i = 1:size(velocity_gradient, 1)
             for j = 1:size(velocity_gradient, 2)
@@ -231,7 +228,20 @@ module Turbulence
             end
         end
 
-        @. (Cₛ * Δ) ^ 2 * sqrt(2 * SijSij)
+        @. sqrt(2 * SijSij)
     end
+
+    export Smagorinsky_νSGS
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain `νSGS` as per the Smagorinsky turbulence model.
+    `S` is the norm of vorticity, `sqrt(2 * SijSij)`
+    """
+    Smagorinsky_νSGS(
+        Δ::AbstractVector, S::AbstractVector;
+        Cₛ::Real = 0.17,
+    ) = (@. (Cₛ * Δ) ^ 2 * S)
 
 end

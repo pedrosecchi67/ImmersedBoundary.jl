@@ -44,6 +44,9 @@ wall = FlowBC(
 
 k = zeros(length(dom))
 
+νSGS = similar(k)
+νSGS .= 0.0
+
 for _ = 1:1000
     dt = dom(P) do part, P
         dt = Inf64
@@ -62,11 +65,24 @@ for _ = 1:1000
         dt
     end |> minimum
 
-    dom(P, k) do part, P, k
+    dom(P, k, νSGS) do part, P, k, νSGS
         let Qnew = primitive2state(fluid, P)        
             Pgrad = [
                 δ(part, P, dim) for dim = 1:2
             ]
+
+            nd = length(Pgrad)
+            let S = shear_rate(
+                [
+                    Pgrad[j][:, i + 2] for i = 1:nd, j = 1:nd
+                ]
+            )
+                Δ = prod(
+                    part.spacing; dims = 2
+                ) |> vec |> x -> x .^ (1.0 / nd)
+
+                νSGS .= Smagorinsky_νSGS(Δ, S)
+            end
 
             Fv = viscous_fluxes(fluid, P, Pgrad)
 
@@ -131,7 +147,7 @@ end
 export_vtk(
     "rae2822", dom;
     p = p, T = T, uv = [u v], Cp = Cp, k = k,
-    uvdiv = uvdiv
+    uvdiv = uvdiv, νSGS = νSGS
 )
 
 end

@@ -479,6 +479,7 @@ TimeAverage
 using ImmersedBoundary.Turbulence
 
 WallFunction
+shear_rate
 Smagorinsky_νSGS
 
 using ImmersedBoundary.IBL
