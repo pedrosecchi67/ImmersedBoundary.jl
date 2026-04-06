@@ -200,7 +200,7 @@ module Turbulence
     """
     $TYPEDSIGNATURES
 
-    Obtain `sqrt(2 * SijSij)` for 3D or `abs(ω)` for 2D.
+    Obtain `sqrt(2 * SijSij)`.
 
     `velocity_gradient` is a matrix such that `velocity_gradient[i, j]`
     indicates the gradient of vel. component `i` along dimension `j`.
@@ -208,16 +208,6 @@ module Turbulence
     function shear_rate(
         velocity_gradient::AbstractMatrix
     )
-        if size(velocity_gradient, 1) == 2 # 2D
-            ω = (
-                velocity_gradient[2, 1] .- velocity_gradient[1, 2]
-            )
-
-            return (
-                @. abs(ω)
-            )
-        end
-
         SijSij = similar(velocity_gradient[1, 1])
         SijSij .= 0.0
         for i = 1:size(velocity_gradient, 1)
