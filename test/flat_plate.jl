@@ -96,7 +96,7 @@ march! = () -> begin
             S = shear_rate(velocity_gradient)
             Δ = prod(part.spacing; dims = 2) |> vec |> x -> sqrt.(x)
 
-            νSGS = Smagorinsky_νSGS(Δ, S)
+            νSGS = Smagorinsky_νSGS(Δ, S; Cₛ = 0.21)
 
             Fv = viscous_fluxes(fluid, P, Pgrad; μₜ = νSGS .* ρ)
             for dim = 1:2
