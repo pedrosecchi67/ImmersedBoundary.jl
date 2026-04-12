@@ -6,7 +6,7 @@ wall_stl = Stereolitography(
     [0.0 1.0; 0.0 0.0], [1; 2;;]
 )
 
-h = 1e-3
+h = 4e-3
 
 CFL = 0.5
 
@@ -44,7 +44,15 @@ P = repeat(
     P∞'; inner = (length(dom), 1)
 )
 
+R∞ = let μ = dynamic_viscosity(fluid, P∞[2])
+    ρ∞ = P∞[1] / P∞[2] / fluid.R
+
+    μ / ρ∞ * 3.0
+end
+R = fill(R∞, length(dom))
+
 Pavg = TimeAverage(1.0)
+Ravg = TimeAverage(1.0)
 
 CTUs = 0.0
 
@@ -64,9 +72,10 @@ march! = () -> begin
         )
     end |> minimum
 
-    dom(P) do part, P
+    dom(P, R) do part, P, R
         let Q = primitive2state(fluid, P)
             ρ = Q[:, 1]
+            T = P[:, 2]
 
             for dim = 1:2
                 Pim2 = getalong(part, P, dim, -2)
@@ -93,30 +102,54 @@ march! = () -> begin
                 Pgrad[j][:, i + 2] for i = 1:2, j = 1:2
             ]
 
-            S = shear_rate(velocity_gradient)
-            Δ = prod(part.spacing; dims = 2) |> vec |> x -> sqrt.(x)
+            μₜ = R .* ρ
 
-            νSGS = Smagorinsky_νSGS(Δ, S; Cₛ = 0.21)
-
-            Fv = viscous_fluxes(fluid, P, Pgrad; μₜ = νSGS .* ρ)
+            Fv = viscous_fluxes(fluid, P, Pgrad; μₜ = μₜ)
             for dim = 1:2
                 Q .+= dt .* δ(part, Fv[dim], dim)
+            end
+
+            let S = shear_rate(velocity_gradient)
+                ∇S = [
+                    δ(part, S, dim) for dim = 1:2
+                ] |> x -> hcat(x...)
+                ∇R = [
+                    δ(part, R, dim) for dim = 1:2
+                ] |> x -> hcat(x...)
+
+                closure = Wray_Argawal(R, S, ∇R, ∇S)
+
+                uvw = @view P[:, 3:end]
+
+                ν = dynamic_viscosity(fluid, T) ./ ρ
+
+                R .+= dt .* (
+                    advection(part, uvw, R) .+ 
+                    dissipation(part, ν .+ closure.νR, R) .+
+                    closure.S
+                )
             end
 
             P .= state2primitive(fluid, Q)
         end
 
         impose_bc!(
-            part, "farfield", P
-        ) do bdry, P
-            freestream_bc(
-                P, bdry.normals
+            part, "farfield", P, R
+        ) do bdry, P, R
+            Rb = similar(R)
+            Rb .= R∞
+
+            (
+                freestream_bc(
+                    P, bdry.normals
+                ),
+                Rb
             )
         end
 
         impose_bc!(
-            part, "wall", P
-        ) do bdry, P
+            part, "wall", P, R
+        ) do bdry, P, R
             p = @view P[:, 1]
             T = @view P[:, 2]
             V = let uvw = @view P[:, 3:end]
@@ -132,18 +165,29 @@ march! = () -> begin
 
             res = wf(y, V, ν)
 
-            wall_bc(
-                P, bdry.normals;
-                du!dn = res.du!dn,
-                image_distances = y
+            Rb = similar(R)
+            @. Rb = min(
+                R, res.νₜ
+            )
+
+            (
+                wall_bc(
+                    P, bdry.normals;
+                    du!dn = res.du!dn,
+                    image_distances = y
+                ),
+                Rb
             )
         end
+
+        @. R = clamp(R, R∞, 100.0 * R∞)
     end
 
     dt̄ = dt * V∞ / 1.0
 
     if CTUs > 1.0
         push!(Pavg, P, dt̄)
+        push!(Ravg, R, dt̄)
     end
 
     dt̄
@@ -162,7 +206,12 @@ while CTUs < 5.0 && nit < 1_000_000
     println("$nit\t$CTUs")
 end
 
-P .= Pavg.μ
+if !isnothing(Pavg.μ) # precaution for testing with fewer iterations
+    P .= Pavg.μ
+end
+if !isnothing(Ravg.μ) # precaution for testing with fewer iterations
+    R .= Ravg.μ
+end
 
 wall = dom.surfaces["wall"]
 Ps = at_offset(wall, P)
@@ -183,10 +232,12 @@ end
 res = wf(y, V, ν)
 
 Cf = res.uτ .^ 2 .* ρ ./ pdyn
+y⁺ = y .* res.uτ ./ ν
 
 surface_data = Dict(
     "wall" => (
         Cf = Cf,
+        y⁺ = y⁺,
     )
 )
 
@@ -196,6 +247,7 @@ export_vtk(
     "flat_plate", dom;
     p = p, T = T,
     uv = [u v],
+    R = R,
     surface_data = surface_data,
 )
 

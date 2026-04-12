@@ -234,4 +234,50 @@ module Turbulence
         Cₛ::Real = 0.17,
     ) = (@. (Cₛ * Δ) ^ 2 * S)
 
+    export Wray_Argawal
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain closure for a 'simplified' Wray-Argawal turbulence model
+    which collapses all constants to the `k-ω` values.
+
+    Remember: BCs involve using `R∞ = 3ν` and `R=0` at walls!
+
+    The return value is a tuple with entries:
+
+    ```
+    (
+        νₜ = R, # just to make sure you know ;)
+        νR = (dissipation rate for R),
+        S = (source term)
+    )
+    ```
+
+    Such that:
+
+    ```
+    Rₜ = - ∇⋅(uR) + ∇⋅[(ν + νR) ∇R] + S
+    ```
+    """
+    function Wray_Argawal(
+        R::AbstractVector, S::AbstractVector,
+        ∇R::AbstractMatrix, ∇S::AbstractMatrix;
+        σR::Real = 0.72, C₁::Real = 0.0829, κ::Real = 0.41,
+    )
+        ϵ = eps(eltype(R)) |> sqrt
+
+        C₂ = σR + C₁ / κ ^ 2
+
+        S = let ∇R∇S = sum(∇R .* ∇S; dims = 2) |> vec
+            @. C₁ * R * S + C₂ * ∇R∇S * (R / (S + ϵ))
+        end
+
+        (
+            νₜ = R,
+            νR = R .* σR,
+            S = S
+        )
+    end
+
 end
