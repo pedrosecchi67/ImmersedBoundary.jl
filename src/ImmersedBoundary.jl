@@ -14,6 +14,9 @@ module ImmersedBoundary
     include("nninterp.jl")
     using .NNInterpolator
 
+    include("point_implicit.jl")
+    import .PointImplicit
+
     """
     $TYPEDFIELDS
 
@@ -574,6 +577,27 @@ module ImmersedBoundary
 
         Domain(
             msh, partitions, surfaces,
+        )
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain multigrid data structure from domain.
+    WARNING: do not use custom array backends with this function
+    """
+    PointImplicit.GeometricMultigrid.Multigrid(
+        dom::Domain, n_levels::Int
+    ) = let V = zeros(length(dom))
+        X = zeros(length(dom), ndims(dom))
+        dom(V, X) do part, V, X
+            V .= prod(part.spacing; dims = 2)
+            X .= part.centers
+        end
+
+        PointImplicit.GeometricMultigrid.Multigrid(
+            X, n_levels,
+            V; first_index = true,
         )
     end
 

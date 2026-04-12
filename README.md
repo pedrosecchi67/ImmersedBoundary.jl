@@ -338,6 +338,41 @@ impose_bc!(part, "family", u) do bdry, u_at_image
 end
 ```
 
+# Solving linear systems
+
+You can solve linear systems using the `ImmersedBoundary.PointImplicit` module. Example for the Laplace equation:
+
+```julia
+using ImmersedBoundary.PointImplicit
+
+mgrid = Multigrid(domain, 4) # 4 levels
+
+function residual(u::AbstractVector)
+    r = similar(u)
+
+    domain(u, r) do part, u, r
+        r .= (
+            ∇(Δ(part, u, 1), 1) .+ ∇(Δ(part, u, 2), 2)
+        ) # plus BC impositions, however you wish to do them
+    end
+
+    r
+end
+
+u = zeros(length(domain))
+A, b, preconditioner = linearize(residual, u;
+    n_hutchinson_samples = 20) # uses Hutchinson's trick to estimate diagonals
+
+s, residual_ratio = solve(
+    A, b, preconditioner;
+    n_iter = 100, rtol = 1e-2, atol = 1e-7,
+    multigrid = mgrid, verbose = true
+)
+u .+= s
+
+# this works with more variables in the columns of a matrix as well.
+```
+
 # Postprocessing with surfaces
 
 Surfaces may be used for postprocessing and coefficient integration. Example:

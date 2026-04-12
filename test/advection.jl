@@ -35,19 +35,22 @@ u = zeros(length(dom))
 Cx = 1.0
 Cy = 1.0
 
-Δt = dom() do part
+# timescale for BC imposition
+τ = dom() do part
     minimum(
         part.spacing ./ [Cx Cy]
     ) / 2
 end |> minimum
-Δt *= 0.5 # CFL
+τ *= 0.5 # CFL
 
-march! = u -> begin
+Δt = 0.2
+
+march! = (u, dt) -> begin
     dom(u) do part, u
         u .+= - (
             ∇(part, u, 1) .* Cx .+
             ∇(part, u, 2) .* Cy
-        ) .* Δt
+        ) .* dt
 
         impose_bc!(part, "upper", u) do bdry, u
             ub = similar(u)
@@ -64,9 +67,31 @@ march! = u -> begin
         end
     end
 end
+udot = u -> let unew = copy(u)
+    march!(unew, τ)
 
-for _ = 1:100
-    march!(u)
+    @. (unew - u) / τ
+end
+
+mgrid = Multigrid(dom, 4)
+
+march_implicit! = u -> begin
+    r = du -> udot(u .+ du) .* Δt .- du
+
+    du = zeros(length(u))
+    A, b, prec = linearize(r, du;
+        n_hutchinson_samples = 30)
+
+    ds, _ = solve(A, b, prec;
+        n_iter = 100, rtol = 1e-2,
+        verbose = true,
+        multigrid = mgrid)
+
+    u .+= ds
+end
+
+for _ = 1:10
+    march_implicit!(u)
 end
 
 export_vtk(
