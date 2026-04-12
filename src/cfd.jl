@@ -449,10 +449,13 @@ module CFD
     $TYPEDSIGNATURES
 
     Obtain CUSP scheme inviscid fluxes given primitive variables on the left and right sides
-    of a face
+    of a face.
+    If `u` (velocity normal to the face) is not provided,
+    it is taken as the velocity along dimension `dim`.
     """
     function inviscid_fluxes(
-        fluid::Fluid, PL::AbstractMatrix, PR::AbstractMatrix, dim::Int;
+        fluid::Fluid, PL::AbstractMatrix, PR::AbstractMatrix, dim::Int,
+        u::Union{AbstractVector, Nothing} = nothing;
         a0::Real = 0.25,
     )
         UcL = primitive2state(fluid, PL)
@@ -465,7 +468,10 @@ module CFD
 
         P = @. (PL + PR) / 2
         T = @view P[:, 2]
-        u = @view P[:, 2 + dim]
+        u = (
+            isnothing(u) ?
+            (@view P[:, 2 + dim]) : u
+        )
 
         a = speed_of_sound(fluid, T)
         M = @. u / a

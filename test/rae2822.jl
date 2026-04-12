@@ -47,7 +47,7 @@ k = zeros(length(dom))
 νSGS = similar(k)
 νSGS .= 0.0
 
-for _ = 1:1000
+for _ = 1:100
     dt = dom(P) do part, P
         dt = Inf64
 
