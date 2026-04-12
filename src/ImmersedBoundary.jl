@@ -70,20 +70,31 @@ module ImmersedBoundary
         image_distances = image_distances[ghost_indices]
         projections = centers[ghost_indices, :] .- normals .* distances
 
+        intp_image = Interpolator(
+            centers, projections .+ image_distances .* normals, tree;
+            linear = true, first_index = true
+        )
+        intp_surf = Interpolator(
+            centers, projections, tree;
+            linear = true, first_index = true
+        )
+
+        # turn to single precision
+        NNInterpolator.ArrayAccumulator.change_data_types!(
+            intp_image, Int64, Float32
+        )
+        NNInterpolator.ArrayAccumulator.change_data_types!(
+            intp_surf, Int64, Float32
+        )
+
         Boundary(
             projections,
             normals, 
             ghost_indices,
             distances,
             image_distances,
-            Interpolator(
-                centers, projections .+ image_distances .* normals, tree;
-                linear = true, first_index = true
-            ),
-            Interpolator(
-                centers, projections, tree;
-                linear = true, first_index = true
-            ),
+            intp_image,
+            intp_surf,
         )
     end
 
@@ -199,6 +210,11 @@ module ImmersedBoundary
                 intp = Interpolator(
                     this_points, this_points .+ this_widths .* v', this_tree;
                     first_index = true, linear = false,
+                )
+
+                # turn to single precision
+                NNInterpolator.ArrayAccumulator.change_data_types!(
+                    intp, Int64, Float32
                 )
 
                 stencil_interpolators[stpoint] = intp
