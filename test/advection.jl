@@ -28,46 +28,46 @@ msh = Mesh(
 )
 
 dom = Domain(msh;
-    max_partition_size = 1000,
-    multigrid_levels = 4)
+    max_partition_size = 1000)
 
 u = zeros(length(dom))
 
-dt = 0.1
 Cx = 1.0
 Cy = 1.0
 
-uold = copy(u)
-du, _, _ = newton_rhapson(
-    dom, u, uold
-) do domain, u, uold
-    r = similar(u)
-    r .= 0.0
+Δt = dom() do part
+    minimum(
+        part.spacing ./ [Cx Cy]
+    ) / 2
+end |> minimum
+Δt *= 0.5 # CFL
 
-    domain(u, uold, r) do part, u, uold, r
-        global dt, Cx, Cy
+march! = u -> begin
+    dom(u) do part, u
+        u .+= - (
+            ∇(part, u, 1) .* Cx .+
+            ∇(part, u, 2) .* Cy
+        ) .* Δt
 
-        unew = uold .- dt .* (
-            ∇(part, u, 1) .* Cx .+ ∇(part, u, 2) .* Cy
-        ) 
-
-        impose_bc!(part, "lower", unew) do bdry, u
-            ub = similar(u)
-            ub .= 0.0
-            ub
-        end
-        impose_bc!(part, "upper", unew) do bdry, u
+        impose_bc!(part, "upper", u) do bdry, u
             ub = similar(u)
             ub .= 1.0
+
             ub
         end
 
-        @. r = unew - u
-    end
+        impose_bc!(part, "lower", u) do bdry, u
+            ub = similar(u)
+            ub .= 0.0
 
-    r
+            ub
+        end
+    end
 end
-u .+= du
+
+for _ = 1:100
+    march!(u)
+end
 
 export_vtk(
     "advection", dom;

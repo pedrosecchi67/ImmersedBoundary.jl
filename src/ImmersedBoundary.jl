@@ -490,7 +490,6 @@ module ImmersedBoundary
         mesh::Mesh
         partitions::AbstractDict{Int64, Partition}
         surfaces::Dict{String, Surface}
-        multigrid::Multigrid
     end
 
     """
@@ -531,7 +530,6 @@ module ImmersedBoundary
         msh::Mesh;
         stencil = nothing,
         max_partition_size::Int = 100_000,
-        multigrid_levels::Int = 0,
         ghost_layer_ratio::Real = 1.5,
     )
         pranges = partition_ranges(length(msh), max_partition_size)
@@ -558,14 +556,8 @@ module ImmersedBoundary
             )
         end
 
-        volumes = prod(msh.widths; dims = 1) |> vec
-        multigrid = Multigrid(
-            (msh.centers |> permutedims), multigrid_levels, volumes;
-            first_index = true
-        )
-
         Domain(
-            msh, partitions, surfaces, multigrid
+            msh, partitions, surfaces,
         )
     end
 
@@ -992,50 +984,12 @@ module ImmersedBoundary
         div
     end
 
-    export newton_rhapson
-
-    """
-    $TYPEDSIGNATURES
-
-    Run an iteration of Newton-Rhapson method
-    on all partitions and return the assembled array of corrections
-    for `Q`. 
-    
-    Function `f` should have format:
-
-    ```
-    r = f(domain, Q, args...; kwargs...)
-    ```
-        
-    Also returns array of final linear system residuals
-    and the residual norm reduction factor achieved.
-
-    Runs `n_cycles` multigrid cycles.
-
-    `args` and `kwargs` are passed to function call.
-    """
-    function newton_rhapson(
-        f, domain::Domain, Q::AbstractArray, args::AbstractArray...;
-        n_cycles::Int = 1000,
-        rtol::Real = 0.01, atol::Real = 1e-7,
-        h::Real = 1e-7,
-        kwargs...
-    )
-        residual = q -> f(domain, q, args...; kwargs...)
-
-        domain.multigrid(
-            residual, Q;
-            n_cycles = n_cycles, rtol = rtol, atol = atol, h = h,
-        )
-    end
-
     include("arraybends.jl")
     using .ArrayBackends
 
     export to_backend
 
     @declare_converter NNInterpolator.Accumulator
-    @declare_converter Multigrid
     @declare_converter Boundary
     @declare_converter Partition
     @declare_converter Surface
