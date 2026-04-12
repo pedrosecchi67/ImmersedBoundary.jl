@@ -63,7 +63,7 @@ module Mesher
     """
     ```
         (b::Ball)(pt::AbstractVector) = max(
-            0.0,
+            0.0f0,
             norm(b.center .- pt) - b.R
         )
     ```
@@ -137,7 +137,7 @@ module Mesher
         end
 
         function read_stl_ascii(filename::String)
-            vertices = Vector{Vector{Float64}}()
+            vertices = Vector{Vector{Float32}}()
             faces = Vector{Vector{Int64}}()
 
             face = Int64[]
@@ -148,9 +148,9 @@ module Mesher
                     if startswith(line, "vertex")
                         # Extract vertex coordinates
                         coords = split(line)
-                        x = parse(Float64, coords[2])
-                        y = parse(Float64, coords[3])
-                        z = parse(Float64, coords[4])
+                        x = parse(Float32, coords[2])
+                        y = parse(Float32, coords[3])
+                        z = parse(Float32, coords[4])
                         push!(vertices, [x, y, z])
                         push!(face, length(vertices))
                     elseif startswith(line, "facet normal")
@@ -188,15 +188,15 @@ module Mesher
                 # number of tris
                 ntri = reinterpret(UInt32, popN(4))[1] |> Int64
 
-                points = zeros(Float64, 3, 3 * ntri)
+                points = zeros(Float32, 3, 3 * ntri)
                 simplices = zeros(Int64, 3, ntri)
 
                 for k = 1:ntri
                     _ = popN(12) # normal
 
-                    points[:, 3*(k-1)+1] .= Float64.(reinterpret(Float32, popN(12)))
-                    points[:, 3*(k-1)+2] .= Float64.(reinterpret(Float32, popN(12)))
-                    points[:, 3*(k-1)+3] .= Float64.(reinterpret(Float32, popN(12)))
+                    points[:, 3*(k-1)+1] .= (reinterpret(Float32, popN(12)))
+                    points[:, 3*(k-1)+2] .= (reinterpret(Float32, popN(12)))
+                    points[:, 3*(k-1)+3] .= (reinterpret(Float32, popN(12)))
 
                     simplices[:, k] .= (3*(k-1)+1):(3*(k-1)+3)
 
@@ -236,8 +236,8 @@ module Mesher
     column in `simplices`, the point indicesfor a simplex face
     """
     struct Stereolitography
-        points::AbstractMatrix{Float64}
-        simplices::AbstractMatrix{Int64}
+        points::AbstractMatrix
+        simplices::AbstractMatrix
     end
 
     """
@@ -248,7 +248,7 @@ module Mesher
     If `closed = true` (default), a closed surface is imposed.
     """
     function Stereolitography(
-        points::AbstractMatrix{Float64};
+        points::AbstractMatrix;
         closed::Bool = true,
     )
         simplices = let inds = 1:size(points, 2)
@@ -281,7 +281,10 @@ module Mesher
     )
 
         if fname[(end - 3):end] in (".dat", ".DAT") # Selig format airfoil
-            return Stereolitography(permutedims(readdlm(fname)); closed = true)
+            return Stereolitography(
+                permutedims(readdlm(fname)) |> x -> Float32.(x); 
+                closed = true
+            )
         end
 
         points, simplices = read_stl(
@@ -355,7 +358,7 @@ module Mesher
                 Int64.(round.(pt ./ tolerance))
             )...
         )
-        new_points = Vector{Float64}[]
+        new_points = AbstractVector[]
 
         nd = size(stls[1].points, 1)
         tag2ind = Dict{
@@ -433,8 +436,8 @@ module Mesher
     tuples for added rules.
     """
     function refine_to_length!(
-        simplex::Matrix{Float64}, h::Real;
-        growth_ratio::Float64 = 1.1,
+        simplex::Matrix, h::Real;
+        growth_ratio::Real = 1.1,
         refinement_regions::AbstractVector = []
     )
         max_violation = 0.0
@@ -500,7 +503,7 @@ module Mesher
     function refine_to_length(
         stl::Stereolitography, h::Real;
         tolerance::Real = 1e-7,
-        growth_ratio::Float64 = 1.1,
+        growth_ratio::Real = 1.1,
         refinement_regions::AbstractVector = []
     )
         stl = begin
@@ -528,7 +531,7 @@ module Mesher
     Obtain faces of simplices
     """
     simplex_faces(
-        simplex::Matrix{Float64}
+        simplex::AbstractMatrix
     ) = [
         let idxs = setdiff(1:size(simplex, 2), i)
             simplex[:, idxs]
@@ -539,9 +542,9 @@ module Mesher
     Obtain projection of a point upon a simplex
     """
     function proj2simplex(
-        simplex::Matrix{Float64}, pt::AbstractVector{Float64}
+        simplex::AbstractMatrix, pt::AbstractVector
     )
-        ϵ = eps(Float64)
+        ϵ = eps(eltype(simplex))
 
         if size(simplex, 2) == 1
             return vec(simplex)
@@ -574,7 +577,7 @@ module Mesher
             sum(ξ) > 1.0 + ϵ
         )
             p = similar(pt)
-            d = Inf64
+            d = Inf32
 
             for face in simplex_faces(simplex)
                 _p = proj2simplex(face, pt)
@@ -595,7 +598,7 @@ module Mesher
     """
     Get simplex normal
     """
-    function _simplex_normal(simplex::AbstractMatrix{Float64}, normalize::Bool = true)
+    function _simplex_normal(simplex::AbstractMatrix, normalize::Bool = true)
 
         ϵ = eps(eltype(simplex))
 
@@ -624,7 +627,7 @@ module Mesher
 
     end
 
-    _simplex_center(simplex::Matrix{Float64}) = dropdims(
+    _simplex_center(simplex::AbstractMatrix) = dropdims(
         sum(simplex; dims = 2); dims = 2
     ) ./ size(simplex, 2)
 
@@ -656,7 +659,7 @@ module Mesher
 
     end
 
-    _face2tag(f::AbstractVector{Int64}) = sort(f) |> f -> tuple(f...)
+    _face2tag(f::AbstractVector) = sort(f) |> f -> tuple(f...)
 
     """
     $TYPEDSIGNATURES
@@ -665,10 +668,10 @@ module Mesher
     and return them in a new STL object
     """
     function feature_regions(stl::Stereolitography;
-        angle::Float64 = 15.0,
-        radius::Float64 = Inf64,
+        angle::Real = 15.0,
+        radius::Real = Inf64,
         include_boundaries::Bool = false)
-        ϵ = eps(Float64)
+        ϵ = eps(Float32)
         nd = size(stl.points, 1)
 
         T = NTuple{nd - 1, Int64}
@@ -732,7 +735,7 @@ module Mesher
     """
     struct DistanceField
         stl::Stereolitography
-        centers::Matrix{Float64}
+        centers::AbstractMatrix
         tree::KDTree
     end
 
@@ -761,7 +764,7 @@ module Mesher
 
     Obtain approximate distance from distance field
     """
-    (dist::DistanceField)(x::AbstractVector{Float64}) = nn(
+    (dist::DistanceField)(x::AbstractVector) = nn(
         dist.tree, x
     )[2]
 
@@ -773,7 +776,7 @@ module Mesher
     as candidates for projection.
     """
     function projection(
-        dist::DistanceField, x::AbstractVector{Float64}, R::Real = 0.0
+        dist::DistanceField, x::AbstractVector, R::Real = 0.0
     )
         idx, d = nn(dist.tree, x)
         p = dist.centers[:, idx]
@@ -807,8 +810,8 @@ module Mesher
     """
     function refine_octree(
         refinement_criteria::AbstractVector,
-        origin::Vector{Float64}, widths::Vector{Float64},
-        growth_ratio::Float64 = 1.1
+        origin::Vector{Float32}, widths::Vector{Float32},
+        growth_ratio::Real = 1.1
     )
         L = maximum(widths)
         R = norm(widths) / 2 # circumradius
@@ -898,12 +901,12 @@ module Mesher
     Struct to define a mesh
     """
     struct Mesh
-        origins::Matrix{Float64}
-        widths::Matrix{Float64}
-        centers::Matrix{Float64}
+        origins::Matrix{Float32}
+        widths::Matrix{Float32}
+        centers::Matrix{Float32}
         in_domain::Vector{Bool}
-        family_distances::Dict{String, Vector{Float64}}
-        family_projections::Dict{String, Matrix{Float64}}
+        family_distances::Dict{String, Vector{Float32}}
+        family_projections::Dict{String, Matrix{Float32}}
         families::Dict{String, Stereolitography}
     end
 
@@ -956,11 +959,11 @@ module Mesher
     ```
     """
     function Mesh(
-        origin::Vector{Float64}, widths::Vector{Float64},
-        surfaces::Tuple{String, Stereolitography, Float64}...;
-        interior_reference::Union{Vector{Float64}, Nothing} = nothing,
-        growth_ratio::Float64 = 1.1,
-        ghost_layer_ratio::Float64 = 1.5,
+        origin::AbstractVector, widths::AbstractVector,
+        surfaces::Tuple...;
+        interior_reference::Union{AbstractVector, Nothing} = nothing,
+        growth_ratio::Real = 1.1,
+        ghost_layer_ratio::Real = 1.5,
         refinement_regions = [],
         hypercube_families = [],
         merge_tolerance::Real = 1e-7,
@@ -1062,7 +1065,7 @@ module Mesher
         t0 = time()
         origins, cell_widths = let cells = refine_octree(
             refinement_regions,
-            origin, widths, growth_ratio
+            Float32.(origin), Float32.(widths), growth_ratio
         )
             (
                 map(t -> t[1], cells) |> x -> reduce(hcat, x),
@@ -1081,8 +1084,8 @@ module Mesher
 
         t0 = time()
         # calculate projs/dists using distance fields
-        family_distances = Dict{String, Vector{Float64}}()
-        family_projections = Dict{String, Matrix{Float64}}()
+        family_distances = Dict{String, Vector{Float32}}()
+        family_projections = Dict{String, Matrix{Float32}}()
 
         radii = sum(
             cell_widths .^ 2; dims = 1
@@ -1094,8 +1097,8 @@ module Mesher
         )
             if length(sname) > 0 # not only meshing resource
                 if !haskey(family_distances, sname)
-                    family_distances[sname] = fill(Inf64, ncells)
-                    family_projections[sname] = Matrix{Float64}(undef, nd, ncells)
+                    family_distances[sname] = fill(Inf32, ncells)
+                    family_projections[sname] = Matrix{Float32}(undef, nd, ncells)
                 end
 
                 dists = family_distances[sname]
@@ -1103,13 +1106,13 @@ module Mesher
 
                 for (i, c) in eachcol(centers) |> enumerate
                     p = projection(
-                        dfield, c, ghost_layer_ratio * 2 * radii[i] # calculate with precision if ghost
+                        dfield, c, ghost_layer_ratio * 4 * radii[i] # calculate with precision if ghost
                     )
                     d = norm(c .- p)
 
                     if d < dists[i]
-                        dists[i] = d
-                        projs[:, i] .= p
+                        dists[i] = Float32(d)
+                        projs[:, i] .= Float32.(p)
                     end
                 end
             end
@@ -1118,7 +1121,7 @@ module Mesher
         # establish hypercube families
         for (family, faces) in hypercube_families
             ps = similar(centers)
-            ds = fill(Inf64, size(centers, 2))
+            ds = fill(Inf32, size(centers, 2))
 
             for (dim, front) in faces
                 projs = copy(centers)
@@ -1151,7 +1154,7 @@ module Mesher
 
         # default
         in_domain = trues(ncells)
-        ϵ = eps(Float64)
+        ϵ = eps(Float32)
 
         if !isnothing(interior_reference)
             verbose && println("Generating KD-tree...")

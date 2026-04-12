@@ -49,6 +49,9 @@ k = zeros(length(dom))
 
 for _ = 1:100
     dt = dom(P) do part, P
+        @assert eltype(part.spacing) === Float32
+        @assert eltype(part.centers) === Float32
+
         dt = Inf64
 
         a = speed_of_sound(fluid, P[:, 2])

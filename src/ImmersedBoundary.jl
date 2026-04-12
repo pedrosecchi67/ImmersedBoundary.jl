@@ -23,11 +23,11 @@ module ImmersedBoundary
     Struct to define a boundary
     """
     struct Boundary
-        points::AbstractMatrix{Float64}
-        normals::AbstractMatrix{Float64}
+        points::AbstractMatrix
+        normals::AbstractMatrix
         ghost_indices::AbstractVector{Int64}
-        ghost_distances::AbstractVector{Float64}
-        image_distances::AbstractVector{Float64}
+        ghost_distances::AbstractVector
+        image_distances::AbstractVector
         image_interpolator::NNInterpolator.Accumulator
         boundary_interpolator::NNInterpolator.Accumulator
     end
@@ -38,29 +38,30 @@ module ImmersedBoundary
     Constructor for a boundary
     """
     function Boundary(
-        centers::AbstractMatrix{Float64},
-        projections::AbstractMatrix{Float64},
+        centers::AbstractMatrix,
+        projections::AbstractMatrix,
         in_domain::AbstractVector{Bool},
-        circumradii::AbstractVector{Float64},
+        circumradii::AbstractVector,
         tree = nothing;
-        ghost_layer_ratio::Real = 1.5,
+        ghost_layer_ratio::Real = 1.5f0,
     )
         if isnothing(tree)
             @warn "Building tree in boundary constructor. This is stupid and you shouldn't be doing it."
             tree = KDTree(centers')
         end
+        Tf = eltype(centers)
 
         normals = (centers .- projections)
         distances = sum(
             normals .^ 2; dims = 2
         ) |> vec |> x -> sqrt.(x)
 
-        ϵ = eps(Float64)
+        ϵ = eps(Tf)
         normals ./= (distances .+ ϵ)
 
         # adjust signs as per distance function
-        @. distances *= 2 * (in_domain - 0.5)
-        @. normals *= 2 * (in_domain - 0.5)
+        @. distances *= 2 * (in_domain - 0.5f0)
+        @. normals *= 2 * (in_domain - 0.5f0)
 
         image_distances = @. ghost_layer_ratio * circumradii * 2
 
@@ -137,13 +138,13 @@ module ImmersedBoundary
     """
     struct Partition
         index::Int64
-        image::AbstractVector{Int64}
-        image_in_domain::AbstractVector{Int64}
-        skirt_indices::AbstractVector{Int64}
-        domain::AbstractVector{Int64}
+        image::AbstractVector
+        image_in_domain::AbstractVector
+        skirt_indices::AbstractVector
+        domain::AbstractVector
         stencils::AbstractDict
-        centers::AbstractMatrix{Float64}
-        spacing::AbstractMatrix{Float64}
+        centers::AbstractMatrix
+        spacing::AbstractMatrix
         boundaries::Dict{String, Boundary}
     end
 
@@ -385,7 +386,7 @@ module ImmersedBoundary
             for (a, b, i) in zip(args, bargs, iargs)
                 selectdim(
                     a, 1, bdry.ghost_indices
-                ) .= i .* η .+ (1.0 .- η) .* b
+                ) .= i .* η .+ (1.0f0 .- η) .* b
             end
         end
     end
@@ -419,10 +420,10 @@ module ImmersedBoundary
     """
     function Surface(
         stl::Stereolitography,
-        cell_centers::AbstractMatrix{Float64},
-        widths::AbstractMatrix{Float64},
+        cell_centers::AbstractMatrix,
+        widths::AbstractMatrix,
         tree = nothing;
-        ghost_layer_ratio::Real = 1.5,
+        ghost_layer_ratio::Real = 1.5f0,
     )
         if isnothing(tree)
             @warn "Constructing trees in surface constructor. Stupid! Stupid! Stupid!"
@@ -438,7 +439,8 @@ module ImmersedBoundary
             normals .^ 2; dims = 1
         ) |> vec |> x -> sqrt.(x)
 
-        ϵ = eps(Float64)
+        Tf = eltype(cell_centers)
+        ϵ = eps(Tf)
         centers = permutedims(centers)
         normals = permutedims(normals)
         normals ./= (areas .+ ϵ)
@@ -452,6 +454,10 @@ module ImmersedBoundary
             cell_centers, centers .+ normals .* offsets, tree; 
             first_index = true, linear = true
         )
+
+        # single precision, as always
+        NNInterpolator.ArrayAccumulator.change_data_types!(interpolator, Int64, Float32)
+        NNInterpolator.ArrayAccumulator.change_data_types!(offset_interpolator, Int64, Float32)
 
         Surface(
             stl, centers, normals, areas,
@@ -549,7 +555,7 @@ module ImmersedBoundary
         msh::Mesh;
         stencil = nothing,
         max_partition_size::Int = 100_000,
-        ghost_layer_ratio::Real = 1.5,
+        ghost_layer_ratio::Real = 1.5f0,
     )
         pranges = partition_ranges(length(msh), max_partition_size)
 
@@ -825,7 +831,7 @@ module ImmersedBoundary
     """
     function laplacian_smoothing(part::Partition, u::AbstractArray)
         uavg = similar(u)
-        uavg .= 0.0
+        uavg .= 0
 
         cnt = 0
         for i = 1:size(part.spacing, 2)
@@ -848,7 +854,7 @@ module ImmersedBoundary
     """
     function stencil_average(part::Partition, u::AbstractArray)
         uavg = similar(u)
-        uavg .= 0.0
+        uavg .= 0
 
         cnt = 0
         for t in part.stencils |> keys
@@ -946,7 +952,7 @@ module ImmersedBoundary
         order::Int = 2,
     )
         mdiv = similar(u, (size(u, 1),))
-        mdiv .= 0.0
+        mdiv .= 0
 
         for dim = 1:size(u, 2)
             v = @view u[:, dim]
@@ -1001,7 +1007,7 @@ module ImmersedBoundary
         part::Partition, μ::Union{Real, AbstractVector}, ϕ::AbstractArray
     )
         div = similar(ϕ)
-        div .= 0.0
+        div .= 0
 
         for dim = 1:size(part.spacing, 2)
             h = @view part.spacing[:, dim]
