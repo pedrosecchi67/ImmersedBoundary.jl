@@ -1214,7 +1214,7 @@ module Mesher
 
                     graph[i] = filter(
                         j -> let cj = centers[:, j]
-                            d + (cj .- c) ⋅ normal > sqrt(ϵ)
+                            d + (cj .- c) ⋅ normal > 0.0f0
                         end, neighs
                     )
                 end
