@@ -1106,7 +1106,7 @@ module Mesher
 
                 for (i, c) in eachcol(centers) |> enumerate
                     p = projection(
-                        dfield, c, ghost_layer_ratio * 4 * radii[i] # calculate with precision if ghost
+                        dfield, c, ghost_layer_ratio * 2 * radii[i] # calculate with precision if ghost
                     )
                     d = norm(c .- p)
 
