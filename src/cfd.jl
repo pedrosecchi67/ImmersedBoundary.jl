@@ -39,12 +39,12 @@ module CFD
     """
     Fluid(
         ;
-        R::Real = 283.0,
-        γ::Real = 1.4,
-        k::Union{Real, AbstractVector} = [0.00646, 6.468e-5],
-        μref::Real = 1.716e-5,
-        Tref::Real = 273.15,
-        S::Real = 110.4,
+        R::Real = 283.0f0,
+        γ::Real = 1.4f0,
+        k::Union{Real, AbstractVector} = [0.00646f0, 6.468f-5],
+        μref::Real = 1.716f-5,
+        Tref::Real = 273.15f0,
+        S::Real = 110.4f0,
     ) = Fluid(
         R, γ, (
             k isa Real ? 
@@ -60,7 +60,7 @@ module CFD
     Obtain speed of sound from temperature
     """
     speed_of_sound(fld::Fluid, T) = (
-        @. sqrt(fld.γ * fld.R * clamp(T, 10.0, Inf64))
+        @. sqrt(fld.γ * fld.R * clamp(T, 10.0f0, Inf32))
     )
 
     """
@@ -70,9 +70,9 @@ module CFD
     """
     dynamic_viscosity(
         fld::Fluid, T
-    ) = let T = @. clamp(T, 10.0, Inf64)
+    ) = let T = @. clamp(T, 10.0f0, Inf32)
         (
-            @. fld.μref * ((T / fld.Tref) ^ (2.0 / 3)) * (fld.Tref + fld.S) / (T + fld.S)
+            @. fld.μref * ((T / fld.Tref) ^ (2.0f0 / 3)) * (fld.Tref + fld.S) / (T + fld.S)
         )
     end
 
@@ -82,7 +82,7 @@ module CFD
     Obtain heat conductivity given temperature
     """
     function heat_conductivity(fld::Fluid, T)
-        k = @. 0.0 * T
+        k = @. 0 * T
         for (i, ki) in enumerate(fld.k)
             k += @. ki * T ^ (i - 1)
         end
@@ -107,14 +107,14 @@ module CFD
         fluid::Fluid, P::AbstractMatrix
     )
         p = @view P[:, 1]
-        T = clamp.(P[:, 2], 10.0, Inf64)
+        T = clamp.(P[:, 2], 10.0f0, Inf32)
         u = @view P[:, 3:end]
 
         k = (sum(u .^ 2; dims = 2) ./ 2) |> vec
 
         ρ = @. p / (fluid.R * T)
         E = @. ρ * (
-            fluid.R / (fluid.γ - 1.0) * T + k
+            fluid.R / (fluid.γ - 1.0f0) * T + k
         )
 
         [
@@ -144,8 +144,8 @@ module CFD
         u = ρu ./ ρ
         k = (sum(u .^ 2; dims = 2) ./ 2) |> vec
 
-        p = @. (fluid.γ - 1.0) * (E - ρ * k)
-        T = @. clamp(p / (ρ * fluid.R), 10.0, Inf64)
+        p = @. (fluid.γ - 1.0f0) * (E - ρ * k)
+        T = @. clamp(p / (ρ * fluid.R), 10.0f0, Inf32)
 
         [p T u]
     end
@@ -242,7 +242,7 @@ module CFD
         P::AbstractMatrix, normals::AbstractMatrix;
         image_distances::Union{Nothing, AbstractVector} = nothing,
         du!dn::Union{Nothing, AbstractVector} = nothing,
-        transpiration::Union{Float64, AbstractVector} = 0.0,
+        transpiration::Union{Real, AbstractVector} = 0.0f0,
     )
         p∞ = bc.P[1]
         T∞ = bc.P[2]
@@ -288,7 +288,7 @@ module CFD
         end
 
         if !isnothing(du!dn)
-            ϵ = eps(Float64) |> sqrt
+            ϵ = eps(eltype(ub))
             V = sum(ub .^ 2; dims = 2) |> vec |> x -> sqrt.(x) .+ ϵ
 
             @. ub *= (V - du!dn * image_distances) / V
@@ -301,23 +301,23 @@ module CFD
 
     function _ISA_atmosphere(altitude_m::Real, ΔT::Real = 0.0)
         # Constants
-        R = 287.05287  # Specific gas constant for dry air [J/(kg·K)]
-        g0 = 9.80665   # Gravitational acceleration [m/s²]
+        R = 287.05287f0  # Specific gas constant for dry air [J/(kg·K)]
+        g0 = 9.80665f0   # Gravitational acceleration [m/s²]
         
         # Sea level conditions
-        P0 = 101325.0   # Pressure at sea level [Pa]
-        T0 = 288.15     # Temperature at sea level [K]
+        P0 = 101325.0f0   # Pressure at sea level [Pa]
+        T0 = 288.15f0     # Temperature at sea level [K]
         
         # Layer definitions [base_altitude, base_temp, lapse_rate, base_pressure]
         # Lapse rate in K/km, converted to K/m internally
         layers = [
-            (0.0,      288.15, -6.5,   101325.0),    # Troposphere
-            (11000.0,  216.65,  0.0,   22632.0),     # Tropopause
-            (20000.0,  216.65,  1.0,   5474.9),      # Stratosphere 1
-            (32000.0,  228.65,  2.8,   868.02),      # Stratosphere 2
-            (47000.0,  270.65,  0.0,   110.91),      # Stratopause
-            (51000.0,  270.65, -2.8,   66.939),      # Mesosphere 1
-            (71000.0,  214.65, -2.0,   3.9564)       # Mesosphere 2
+            (0.0f0,      288.15f0, -6.5f0,   101325.0f0),    # Troposphere
+            (11000.0f0,  216.65f0,  0.0f0,   22632.0f0),     # Tropopause
+            (20000.0f0,  216.65f0,  1.0f0,   5474.9f0),      # Stratosphere 1
+            (32000.0f0,  228.65f0,  2.8f0,   868.02f0),      # Stratosphere 2
+            (47000.0f0,  270.65f0,  0.0f0,   110.91f0),      # Stratopause
+            (51000.0f0,  270.65f0, -2.8f0,   66.939f0),      # Mesosphere 1
+            (71000.0f0,  214.65f0, -2.0f0,   3.9564f0)       # Mesosphere 2
         ]
         # Note: Above 86km, the model becomes more complex and not included here
         
@@ -338,7 +338,7 @@ module CFD
         
         # Get layer parameters
         h_base, T_base, lapse_rate, P_base = layers[layer_idx]
-        lapse_rate_per_m = lapse_rate / 1000.0  # Convert to K/m
+        lapse_rate_per_m = lapse_rate / 1000.0f0  # Convert to K/m
         
         # Calculate geometric height difference
         delta_h = altitude_m - h_base
@@ -348,7 +348,7 @@ module CFD
         T = T_base + lapse_rate_per_m * delta_h + ΔT
         
         # Calculate pressure based on lapse rate
-        if abs(lapse_rate_per_m) < 1e-10
+        if abs(lapse_rate_per_m) < 1f-10
             # Isothermal layer - using T_base (without offset) for pressure calculation
             # This maintains hydrostatic consistency
             P = P_base * exp(-g0 * delta_h / (R * (T_base + ΔT)))
@@ -375,11 +375,11 @@ module CFD
     is imposed.
     """
     ISA_atmosphere(
-        altitude_m::Float64; 
-        ΔT::Float64 = 0.0,
-        Mach::Float64 = 0.0,
-        V::Union{Float64, Nothing} = nothing,
-        û::AbstractVector = [1.0],
+        altitude_m::Real; 
+        ΔT::Real = 0.0f0,
+        Mach::Real = 0.0f0,
+        V::Union{Real, Nothing} = nothing,
+        û::AbstractVector = [1.0f0],
     ) = let (p, T) = _ISA_atmosphere(altitude_m, ΔT)
         fluid = Fluid()
 
@@ -389,7 +389,7 @@ module CFD
             u = Mach * a
         end
 
-        û = û ./ (eps(Float64) + norm(û))
+        û = û ./ (eps(eltype(û)) + norm(û))
 
         (fluid, [p; T; (u .* û)])
     end
@@ -415,11 +415,11 @@ module CFD
     as a function of pressure throughout the field, freestream pressure
     and freestream Mach number.
     """
-    function pressure_coefficient(fluid::Fluid, p, p∞::Float64, M∞::Float64)
+    function pressure_coefficient(fluid::Fluid, p, p∞::Real, M∞::Real)
 
         γ = fluid.γ
 
-        Cp = @. 2 * (p / p∞ - 1.0) / (M∞ ^ 2 * γ)
+        Cp = @. 2 * (p / p∞ - 1.0f0) / (M∞ ^ 2 * γ)
 
     end
 
@@ -434,12 +434,12 @@ module CFD
     ]
 
     _cusp_f1(m::Real, a0::Real) = (
-        (abs(m) < 1.0) * (a0 + (1.5 - 2 * a0) * m ^ 2 + (a0 - 0.5) * m ^ 4) +
+        (abs(m) < 1.0) * (a0 + (1.5f0 - 2 * a0) * m ^ 2 + (a0 - 0.5f0) * m ^ 4) +
         (abs(m) >= 1.0) * abs(m)
     )
 
     _cusp_f2(m::Real) = (
-        (abs(m) < 1.0) * (m * (3.0 - m ^ 2) / 2) + 
+        (abs(m) < 1.0) * (m * (3.0f0 - m ^ 2) / 2) + 
         (abs(m) >= 1.0) * sign(m)
     )
 
@@ -456,7 +456,7 @@ module CFD
     function inviscid_fluxes(
         fluid::Fluid, PL::AbstractMatrix, PR::AbstractMatrix, dim::Int,
         u::Union{AbstractVector, Nothing} = nothing;
-        a0::Real = 0.25,
+        a0::Real = 0.25f0,
     )
         UcL = primitive2state(fluid, PL)
         pL = PL[:, 1]
@@ -542,7 +542,7 @@ module CFD
     """
     function viscous_fluxes(
         fluid::Fluid, P::AbstractMatrix, Pgrad::AbstractVector;
-        μₜ::Union{AbstractVector, Real} = 0.0
+        μₜ::Union{AbstractVector, Real} = 0.0f0
     )
         T = @view P[:, 2]
 
@@ -560,14 +560,14 @@ module CFD
 
         # shear tensor
         divu = similar(T)
-        divu .= 0.0
+        divu .= 0
         for i = 1:nd
             divu .+= vel_grad[i, i]
         end
 
         τ = [
             (
-                (vel_grad[i, j] .+ vel_grad[j, i]) .- (i == j ? 2.0 / 3.0 : 0.0) .* divu
+                (vel_grad[i, j] .+ vel_grad[j, i]) .- (i == j ? 2.0f0 / 3 : 0.0f0) .* divu
             ) .* μ for i = 1:nd, j = 1:nd
         ]
 
@@ -578,7 +578,7 @@ module CFD
 
         [
             let F = similar(P)
-                F .= 0.0
+                F .= 0.0f0
 
                 # energy
                 F[:, 2] .+= f[dim]
@@ -632,12 +632,12 @@ module CFD
     μ = μ * (1 - η) + Q * η
     ```
     """
-    function Base.push!(avg::TimeAverage, Q, dt = 1.0)
+    function Base.push!(avg::TimeAverage, Q, dt = 1.0f0)
 
         # first registry
         if isnothing(avg.μ)
             avg.μ = copy(Q)
-            avg.σ = avg.μ .* 0.0
+            avg.σ = avg.μ .* 0
 
             return avg.μ
         end
@@ -651,11 +651,11 @@ module CFD
         η = @. dt / avg.τ
 
         if isa(Q, AbstractArray)
-            @. avg.σ = sqrt(avg.σ ^ 2 * (1.0 - η) + (avg.μ - Q) ^ 2 * η)
-            @. avg.μ = avg.μ * (1.0 - η) + Q * η
+            @. avg.σ = sqrt(avg.σ ^ 2 * (1.0f0 - η) + (avg.μ - Q) ^ 2 * η)
+            @. avg.μ = avg.μ * (1.0f0 - η) + Q * η
         else
-            avg.σ = @. sqrt(avg.σ ^ 2 * (1.0 - η) + (avg.μ - Q) ^ 2 * η)
-            avg.μ = @. avg.μ * (1.0 - η) + Q * η
+            avg.σ = @. sqrt(avg.σ ^ 2 * (1.0f0 - η) + (avg.μ - Q) ^ 2 * η)
+            avg.μ = @. avg.μ * (1.0f0 - η) + Q * η
         end
 
         avg.μ

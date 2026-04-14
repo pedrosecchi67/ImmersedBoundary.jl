@@ -68,22 +68,21 @@ stl = merge_points(stl1, stl2; tolerance = 1e-5)
 
 ```julia
 struct Mesh
-    origins::Matrix{Float64} # (ndims, ncells)
-    widths::Matrix{Float64}
-    centers::Matrix{Float64}
+    origins::Matrix{Float32}
+    widths::Matrix{Float32}
+    centers::Matrix{Float32}
     in_domain::Vector{Bool}
-    family_distances::Dict{String, Vector{Float64}}
-    family_projections::Dict{String, Matrix{Float64}}
+    family_distances::Dict{String, Vector{Float32}}
+    family_projections::Dict{String, Matrix{Float32}}
     families::Dict{String, Stereolitography}
 end
 
 function Mesh(
-    origin::Vector{Float64}, widths::Vector{Float64},
-    surfaces::Tuple{String, Stereolitography, Float64}...;
-    interior_reference::Union{Vector{Float64}, Nothing} = nothing,
-    boundary_surface::Union{Stereolitography, Nothing} = nothing,
-    growth_ratio::Float64 = 1.1,
-    ghost_layer_ratio::Float64 = 1.5,
+    origin::AbstractVector, widths::AbstractVector,
+    surfaces::Tuple...;
+    interior_reference::Union{AbstractVector, Nothing} = nothing,
+    growth_ratio::Real = 1.1,
+    ghost_layer_ratio::Real = 1.5,
     refinement_regions = [],
     hypercube_families = [],
     merge_tolerance::Real = 1e-7,
@@ -224,13 +223,13 @@ The remaining fields of `Partition` include:
 ```julia
 struct Partition
     index::Int64
-    image::AbstractVector{Int64}
-    image_in_domain::AbstractVector{Int64}
-    skirt_indices::AbstractVector{Int64}
-    domain::AbstractVector{Int64}
+    image::AbstractVector
+    image_in_domain::AbstractVector
+    skirt_indices::AbstractVector
+    domain::AbstractVector
     stencils::AbstractDict
-    centers::AbstractMatrix{Float64} # (ncells, ndims)
-    spacing::AbstractMatrix{Float64} # (ncells, ndims)
+    centers::AbstractMatrix # (ncells, ndims)
+    spacing::AbstractMatrix # (ncells, ndims)
     boundaries::Dict{String, Boundary}
 end
 ```
@@ -267,7 +266,7 @@ divergent
 function impose_bc!(
     f,
     part::Partition, bname::String,
-    args::AbstractArray{Float64}...;
+    args::AbstractArray...;
     impose_at_ghost::Bool = false,
     kwargs...
 )
@@ -316,11 +315,11 @@ by activating flag `impose_at_ghost`.
 
 ```julia
 struct Boundary
-    points::AbstractMatrix{Float64} # (npoints, ndims)
-    normals::AbstractMatrix{Float64} # (npoints, ndims)
-    ghost_indices::AbstractVector{Int64}
-    ghost_distances::AbstractVector{Float64}
-    image_distances::AbstractVector{Float64}
+    points::AbstractMatrix # (npoints, ndims)
+    normals::AbstractMatrix # (npoints, ndims)
+    ghost_indices::AbstractVector
+    ghost_distances::AbstractVector
+    image_distances::AbstractVector
     image_interpolator::NNInterpolator.Accumulator
     boundary_interpolator::NNInterpolator.Accumulator
 end

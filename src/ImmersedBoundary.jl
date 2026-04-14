@@ -357,7 +357,7 @@ module ImmersedBoundary
     function impose_bc!(
         f,
         part::Partition, bname::String,
-        args::AbstractArray{Float64}...;
+        args::AbstractArray...;
         impose_at_ghost::Bool = false,
         kwargs...
     )
@@ -405,10 +405,10 @@ module ImmersedBoundary
     """
     struct Surface
         stl::Stereolitography
-        centers::AbstractMatrix{Float64}
-        normals::AbstractMatrix{Float64}
-        areas::AbstractVector{Float64}
-        offsets::AbstractVector{Float64}
+        centers::AbstractMatrix
+        normals::AbstractMatrix
+        areas::AbstractVector
+        offsets::AbstractVector
         interpolator::NNInterpolator.Accumulator
         offset_interpolator::NNInterpolator.Accumulator
     end

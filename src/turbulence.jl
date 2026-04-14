@@ -56,12 +56,12 @@ module Turbulence
     struct WallFunction
         log10Rey::AbstractVector
         log10y⁺::AbstractVector
-        κ::Float64
-        A::Float64
-        β::Float64
-        βstar::Float64
-        D::Float64
-        A⁺::Float64
+        κ::Real
+        A::Real
+        β::Real
+        βstar::Real
+        D::Real
+        A⁺::Real
     end
 
     """
@@ -78,25 +78,25 @@ module Turbulence
     """
     function WallFunction(
         ; 
-        h0::Float64 = 0.01, 
-        growth_ratio::Float64 = 1.05,
-        y⁺_max::Float64 = 10000.0,
-        constant_layer_y⁺::Float64 = 15.0,
-        κ::Float64 = 0.41, A::Float64 = 19.0,
-        β::Float64 = 0.075, βstar::Float64 = 0.09,
-        D::Float64 = 4.2, A⁺::Float64 = 360.0,
-        Cf_max::Float64 = 0.01,
+        h0::Real = 0.01f0, 
+        growth_ratio::Real = 1.05f0,
+        y⁺_max::Real = 10000.0f0,
+        constant_layer_y⁺::Real = 15.0f0,
+        κ::Real = 0.41f0, A::Real = 19.0f0,
+        β::Real = 0.075f0, βstar::Real = 0.09f0,
+        D::Real = 4.2f0, A⁺::Real = 360.0f0,
+        Cf_max::Real = 0.01f0,
     )
         h = h0
 
-        ϵ = eps(Float64) |> sqrt
+        ϵ = 1f-10
         yps = [ϵ, h]
         ups = [ϵ, h]
 
         while yps[end] < y⁺_max
             yp = yps[end]
-            μ⁺ = κ * yp * (1.0 - exp(- yp / A)) ^ 2
-            du!dy = 1.0 / (μ⁺ + 1.0)
+            μ⁺ = κ * yp * (1.0f0 - exp(- yp / A)) ^ 2
+            du!dy = 1.0 / (μ⁺ + 1.0f0)
 
             push!(
                 yps, yp + h
@@ -113,9 +113,9 @@ module Turbulence
         g = @. sin(
             yps / y⁺_max * π / 2
         ) ^ 2
-        upmax = ups[end] + sqrt(2.0 / Cf_max)
+        upmax = ups[end] + sqrt(2.0f0 / Cf_max)
 
-        @. ups = g * upmax + (1.0 - g) * ups
+        @. ups = g * upmax + (1.0f0 - g) * ups
 
         Rey = @. ups * yps
 
@@ -134,24 +134,24 @@ module Turbulence
     position of the first cell center).
     """
     function (wf::WallFunction)(Rey::AbstractVector)
-        ϵ = eps(Float64)
-        Rey = @. clamp(abs(Rey), ϵ, Inf64)
+        ϵ = eps(eltype(Rey))
+        Rey = @. clamp(abs(Rey), ϵ, Inf32)
 
         # interpolated from previous diff. equation solution
         log10Rey = log10.(Rey)
-        y⁺ = 10.0 .^ linear_interpolation(
+        y⁺ = 10.0f0 .^ linear_interpolation(
             log10Rey, wf.log10Rey, wf.log10y⁺
         )
         
         u⁺ = Rey ./ y⁺
 
         # from van Driest
-        μ⁺ = @. wf.κ * y⁺ * (1.0 - exp(- y⁺ / wf.A)) ^ 2
-        du⁺!dy⁺ = @. 1.0 / (1.0 + μ⁺)
+        μ⁺ = @. wf.κ * y⁺ * (1.0f0 - exp(- y⁺ / wf.A)) ^ 2
+        du⁺!dy⁺ = @. 1.0f0 / (1.0f0 + μ⁺)
 
         # from Nakagawa-Nezu
         k⁺ = @. min(
-            y⁺ ^ 2 / (6.0 * wf.βstar / wf.β - 2.0),
+            y⁺ ^ 2 / (6.0f0 * wf.βstar / wf.β - 2.0f0),
             wf.D * exp(
                 - y⁺ / wf.A⁺
             )
@@ -209,7 +209,7 @@ module Turbulence
         velocity_gradient::AbstractMatrix
     )
         SijSij = similar(velocity_gradient[1, 1])
-        SijSij .= 0.0
+        SijSij .= 0
         for i = 1:size(velocity_gradient, 1)
             for j = 1:size(velocity_gradient, 2)
                 SijSij .+= (
@@ -231,7 +231,7 @@ module Turbulence
     """
     Smagorinsky_νSGS(
         Δ::AbstractVector, S::AbstractVector;
-        Cₛ::Real = 0.17,
+        Cₛ::Real = 0.17f0,
     ) = (@. (Cₛ * Δ) ^ 2 * S)
 
     export Wray_Argawal
@@ -263,9 +263,9 @@ module Turbulence
     function Wray_Argawal(
         R::AbstractVector, S::AbstractVector,
         ∇R::AbstractMatrix, ∇S::AbstractMatrix;
-        σR::Real = 0.72, C₁::Real = 0.0829, κ::Real = 0.41,
+        σR::Real = 0.72f0, C₁::Real = 0.0829f0, κ::Real = 0.41f0,
     )
-        ϵ = eps(eltype(R)) |> sqrt
+        ϵ = eps(eltype(R))
 
         C₂ = σR + C₁ / κ ^ 2
 
