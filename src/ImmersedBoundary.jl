@@ -1198,6 +1198,8 @@ $(nblocks * block_size ^ nd) cells""")
     include("turbulence.jl")
     using .Turbulence
 
+    @declare_converter Turbulence.WallFunction
+
     include("ibl.jl")
     using .IBL
 
