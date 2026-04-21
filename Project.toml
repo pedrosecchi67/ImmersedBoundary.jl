@@ -1,6 +1,6 @@
 name = "ImmersedBoundary"
 uuid = "3b474169-8a00-48df-8b3c-443b4d82ac46"
-version = "0.2.0"
+version = "1.0.0"
 authors = ["pedrosecchi67"]
 
 [deps]

@@ -1,4 +1,4 @@
-module Mesher
+module BlockMesher
 
     using DocStringExtensions
 
@@ -12,7 +12,7 @@ module Mesher
         Box, Ball, Line, DistanceField,
         feature_regions, centers_and_normals,
         vtk_grid, vtk_save,
-        Mesh
+        Mesh, get_cells
 
     """
     ```
@@ -781,7 +781,7 @@ module Mesher
         idx, d = nn(dist.tree, x)
         p = dist.centers[:, idx]
 
-        if R > 0.0
+        if R > d
             idxs = inrange(dist.tree, x, R)
 
             for i in idxs
@@ -862,527 +862,326 @@ module Mesher
     end
 
     """
-    Run DFS on graph.
+    $TYPEDSIGNATURES
+
+    (Orderly) refine STLs to distance fields and local refinement levels.
+    Returns the corresponding `DistanceField` structs.
+    
+    Inputs are tuples or pairs between stereolitography objects and the local 
+    refinement.
+
+    Refinement regions are passed as tuples between distance functions and
+    local refinement.
+
+    `ratio` is a multiplying factor applied to all refinement levels.
     """
-    function dfs(graph::Vector{Vector{Int64}}, start_node::Int64)::Vector{Int64}
-        # Initialize visited array
-        visited = falses(length(graph))
-        
-        # Initialize result vector
-        result = Int64[]
-        
-        # Use a stack for iterative DFS
-        stack = Set([start_node])
-        
-        while !isempty(stack)
-            # Pop the top node from the stack
-            node = pop!(stack)
-            
-            if !visited[node]
-                # Mark as visited and add to result
-                visited[node] = true
-                push!(result, node)
-                
-                # Push all unvisited neighbors to the stack
-                for neighbor in graph[node]
-                    if !visited[neighbor]
-                        push!(stack, neighbor)
-                    end
-                end
-            end
+    function refine_orderly(
+        surfaces...;
+        refinement_regions::AbstractVector = [],
+        ratio::Real = 0.5f0,
+        growth_ratio::Real = 2.0f0,
+        tolerance::Real = 1f-7,
+    )
+        surface_order = let hs = map(
+            s -> s[2], surfaces |> collect
+        )
+            sortperm(hs)
         end
-        
-        return result
+        result_dict = Dict{Int64, DistanceField}()
+
+        refinement_regions = Any[
+            (t[1], t[2] * ratio) for t in refinement_regions
+        ]
+
+        for i in surface_order
+            stl, h = surfaces[i]
+            h *= ratio
+
+            stl = refine_to_length(
+                stl, h;
+                tolerance = tolerance,
+                refinement_regions = refinement_regions,
+                growth_ratio = growth_ratio
+            )
+
+            dfield = DistanceField(stl)
+            result_dict[i] = dfield
+
+            push!(
+                refinement_regions, (dfield, h)
+            )
+        end
+
+        map(
+            i -> result_dict[i], 1:length(surfaces)
+        )
     end
 
     """
     $TYPEDFIELDS
 
-    Struct to define a mesh
+    Struct to define a mesh.
+    Matrices are of shape `(ndims, nblocks)`.
     """
     struct Mesh
-        origins::Matrix{Float32}
-        widths::Matrix{Float32}
-        centers::Matrix{Float32}
-        in_domain::Vector{Bool}
-        family_distances::Dict{String, Vector{Float32}}
-        family_projections::Dict{String, Matrix{Float32}}
-        families::Dict{String, Stereolitography}
+        origin::AbstractVector{Float32}
+        widths::AbstractVector{Float32}
+        block_size::Int32
+        block_origins::AbstractMatrix{Float32}
+        block_widths::AbstractMatrix{Float32}
+        distance_fields::Dict{String, DistanceField}
     end
 
     """
     $TYPEDSIGNATURES
 
-    Generate an octree/quadtree mesh described by:
+    Generate a mesh given hypercube origins and widths.
 
-        * A hypercube origin;
-        * A vector of hypercube widths;
-        * A set of tuples in format `(name, surface, max_length)` describing
-            stereolitography surfaces (`Mesher.Stereolitography`) and 
-            the max. cell widths at these surfaces;
-        * A set of refinement regions described by distance functions and
-            the local refinement at each region. Example:
-                ```
-                refinement_regions = [
-                    Mesher.Ball([0.0, 0.0], 0.1) => 0.005,
-                    Mesher.Ball([1.0, 0.0], 0.1) => 0.005,
-                    Mesher.Box([-1.0, -1.0], [3.0, 2.0]) => 0.0025,
-                    Mesher.Line([1.0, 0.0], [2.0, 0.0]) => 0.005
-                ]
-                ```
-        * A cell growth ratio;
-        * An interior point reference; and
-        * A ghost layer ratio, which defines the thickness of the ghost cell layer
-            within a solid as a ratio of the local cell circumdiameter.
+    Surfaces should be specified as tuples with family names,
+    `Stereolitography` structs and local refinement levels, respectively.
 
-    Family naming may be implemented by giving the same name string to several surfaces.
-    Surfaces without family names ("", empty strings) will be considered merely
-    a meshing resource, not a boundary.
+    Refinement regions, meanwhile, may be specified as tuples between distance
+    functions (see `Line, Box, Ball, DistanceField` in this module) and local refinement levels.
 
-    Hypercube boundary family names may be specified by:
+    An approximate growth rate is accepted for the block octree/quadtree.
+    The block size (along all axes) is given by `block_size` (def. 8).
+
+    Example:
 
     ```
-    hypercube_families = [
-        "inlet" => [
-            (1, false), # back face, x axis
-            (2, true), # front face, y axis
-            (3, false), # bottom face, z axis
-            (3, true) # top face, z axis
+    stl = Stereolitography("wall.dat") # or STL in 3D
+    stl2 = Stereolitography("wall2.dat")
+
+    features = feature_regions(stl) |> DistanceField
+    region2 = Stereolitography("region.stl") |> DistanceField
+
+    msh = Mesh(
+        [-1.0, -1.0], [3.0, 3.0], # origin, widths
+        ("wall", stl, 1e-3),
+        ("wall2", stl2, 2e-3);
+        growth_ratio = 2.0f0, # default
+        refinement_regions = [
+            features => 5e-4,
+            region2 => 1e-2,
+            Ball([0.0, 0.0], 1.0) => 2e-2,
+            Box([-1.0, -1.0], [1.0, 2.0]) => 1e-2
         ],
-        "symmetry" => [
-            (2, false) # left face, y axis
-        ],
-        "outlet" => [
-            (1, true) # front face, x axis
-        ]
-    ]
+    )
     ```
     """
     function Mesh(
         origin::AbstractVector, widths::AbstractVector,
-        surfaces::Tuple...;
-        interior_reference::Union{AbstractVector, Nothing} = nothing,
-        growth_ratio::Real = 1.1,
-        ghost_layer_ratio::Real = 1.5,
-        refinement_regions = [],
-        hypercube_families = [],
-        merge_tolerance::Real = 1e-7,
+        surfaces...;
+        growth_ratio::Real = 2.0f0,
+        tolerance::Real = 1f-7,
+        block_size::Int = 8,
+        refinement_regions::AbstractVector = [],
         verbose::Bool = false,
     )
-        verbose && println("====Starting mesh generation====")
-
-        t0_global = time()
-
-        verbose && println("Adding surface refinement to match volume regions...")
+        verbose && println("==Starting block-mesh generation procedure...==")
 
         t0 = time()
-        # refine surfaces to refinement regions and to their own
-        # characteristic lengths
-        surfaces = [
-            (
-                sname,
-                refine_to_length(stl, h / 2;
-                    tolerance = merge_tolerance,
-                    growth_ratio = growth_ratio,
-                    refinement_regions = refinement_regions),
-                h
-            ) for (sname, stl, h) in surfaces
-        ]
+        verbose && println("Refining surfaces to local refinement levels...")
+        
+        block_size = Int32(block_size)
 
-        # now add refinement according to the other surfaces
-        let hs = map(t -> t[3], surfaces)
-            asrt = sortperm(hs)
+        origin = Float32.(origin)
+        widths = Float32.(widths)
 
-            for (k, i) in enumerate(asrt)
-                stl_i = surfaces[i][2]
-                h = surfaces[i][3]
-                dfield = DistanceField(stl_i)
-
-                for j in asrt[(k + 1):end]
-                    sname, stl, L = surfaces[j]
-
-                    surfaces[j] = (
-                        sname,
-                        refine_to_length(
-                            stl, L;
-                            tolerance = merge_tolerance,
-                            growth_ratio = growth_ratio,
-                            refinement_regions = [
-                                (dfield, h / 2)
-                            ]
-                        ),
-                        L
-                    )
-                end
-            end
-        end
-
-        verbose && println("[DONE] $(time() - t0) seconds elapsed")
-
-        verbose && println("Creating surface approx. distance fields...")
-
-        t0 = time()
-        # create dist. fields and add them to ref. regions
-        distance_fields = DistanceField[] # for re-use
-        refinement_regions = [
-            refinement_regions;
+        hs = Dict(
             [
-                let dfield = DistanceField(stl)
-                    push!(distance_fields, dfield)
+                sname => h for (sname, _, h) in surfaces
+            ]...
+        )
+        dfields = let dfields = refine_orderly(
+            [
+                (stl, h) for (_, stl, h) in surfaces
+            ]...;
+            refinement_regions = refinement_regions,
+            growth_ratio = growth_ratio, tolerance = tolerance
+        )
+            Dict(
+                [
+                    t[1] => dfield for (t, dfield) in zip(
+                        surfaces, dfields
+                    )
+                ]...
+            )
+        end
+        verbose && println("[DONE] - $(time() - t0) seconds elapsed")
 
-                    (dfield, h)
-                end for (
-                    _, stl, h
-                ) in surfaces
-            ]
+        ref_regions = Any[
+            (t[1], t[2] * block_size) for t in refinement_regions
         ]
-
-        verbose && println("[DONE] $(time() - t0) seconds elapsed")
-
-        verbose && println("Creating joint surfaces for future family representation...")
-
-        t0 = time()
-        # joining surfaces
-        stl_families = Dict{String, Vector{Stereolitography}}()
-        for (sname, stl, _) in surfaces
-            if length(sname) > 0
-                if !haskey(stl_families, sname)
-                    stl_families[sname] = Stereolitography[]
-                end
-
-                push!(stl_families[sname], stl)
-            end
+        for sname in keys(dfields)
+            push!(
+                ref_regions,
+                (dfields[sname], hs[sname] * block_size)
+            )
         end
 
-        stl_families = Dict(
-            sname => cat(stls...) for (sname, stls) in stl_families
-        )
-
-        verbose && println("[DONE] $(time() - t0) seconds elapsed")
-
-        verbose && println("Refining octree to distance fields...")
-
+        verbose && println("Refining region tree...")
         t0 = time()
-        origins, cell_widths = let cells = refine_octree(
-            refinement_regions,
-            Float32.(origin), Float32.(widths), growth_ratio
+
+        block_origins, block_widths = let ows = refine_octree(
+            ref_regions, origin, widths,
+            growth_ratio
         )
             (
-                map(t -> t[1], cells) |> x -> reduce(hcat, x),
-                map(t -> t[2], cells) |> x -> reduce(hcat, x),
-            )
-        end
-        centers = @. origins + cell_widths / 2
-        ncells = size(centers, 2)
-        nd = size(centers, 1)
-
-        verbose && println("$ncells cells generated")
-
-        verbose && println("[DONE] $(time() - t0) seconds elapsed")
-
-        verbose && println("Calculating cell-family distances...")
-
-        t0 = time()
-        # calculate projs/dists using distance fields
-        family_distances = Dict{String, Vector{Float32}}()
-        family_projections = Dict{String, Matrix{Float32}}()
-
-        radii = sum(
-            cell_widths .^ 2; dims = 1
-        ) |> vec |> x -> sqrt.(x) ./ 2
-
-        # calculating distance to each surface family
-        for ((sname, _, _), dfield) in zip(
-            surfaces, distance_fields
-        )
-            if length(sname) > 0 # not only meshing resource
-                if !haskey(family_distances, sname)
-                    family_distances[sname] = fill(Inf32, ncells)
-                    family_projections[sname] = Matrix{Float32}(undef, nd, ncells)
-                end
-
-                dists = family_distances[sname]
-                projs = family_projections[sname]
-
-                for (i, c) in eachcol(centers) |> enumerate
-                    p = projection(
-                        dfield, c, ghost_layer_ratio * 2 * radii[i] # calculate with precision if ghost
-                    )
-                    d = norm(c .- p)
-
-                    if d < dists[i]
-                        dists[i] = Float32(d)
-                        projs[:, i] .= Float32.(p)
-                    end
-                end
-            end
-        end
-
-        # establish hypercube families
-        for (family, faces) in hypercube_families
-            ps = similar(centers)
-            ds = fill(Inf32, size(centers, 2))
-
-            for (dim, front) in faces
-                projs = copy(centers)
-                projs[dim, :] .= (
-                    front ?
-                    origin[dim] + widths[dim] :
-                    origin[dim]
-                )
-
-                for (i, p) in eachcol(projs) |> enumerate
-                    d = norm(p .- centers[:, i])
-
-                    if d < ds[i]
-                        ds[i] = d
-                        ps[:, i] .= p
-                    end
-                end
-            end
-
-            family_distances[family] = ds
-            family_projections[family] = ps
-        end
-
-        verbose && println("[DONE] $(time() - t0) seconds elapsed")
-
-        # deallocate no-longer-needed variables
-        surfaces = nothing
-        distance_fields = nothing
-        refinement_regions = nothing
-
-        # default
-        in_domain = trues(ncells)
-        ϵ = eps(Float32)
-
-        if !isnothing(interior_reference)
-            verbose && println("Generating KD-tree...")
-            t0 = time()
-
-            tree = KDTree(centers)
-
-            verbose && println("[DONE] $(time() - t0) seconds elapsed")
-
-            t0 = time()
-            verbose && println("Generating conn. graph...")
-
-            graph = map(
-                (c, r) -> inrange(tree, c, 2.1 * r),
-                eachcol(centers), radii
-            )
-            
-            # ensure reciprocity
-            for (i, neighs) in enumerate(graph)
-                for j in neighs
-                    if i != j
-                        jneighs = graph[j]
-
-                        if !(i in jneighs)
-                            push!(jneighs, i)
-                        end
-                    end
-                end
-            end
-            for i = length(graph):-1:1
-                neighs = graph[i]
-
-                for j in neighs
-                    if i != j
-                        jneighs = graph[j]
-
-                        if !(i in jneighs)
-                            push!(jneighs, i)
-                        end
-                    end
-                end
-            end
-
-            # removing connectivity when crossing boundaries
-            for (family, projs) in family_projections
-                dists = family_distances[family]
-
-                for (i, neighs) in enumerate(graph)
-                    c = centers[:, i]
-                    p = projs[:, i]
-                    d = dists[i]
-
-                    normal = c .- p
-                    normal ./= (
-                        norm(normal) + ϵ
-                    )
-
-                    graph[i] = filter(
-                        j -> let cj = centers[:, j]
-                            d + (cj .- c) ⋅ normal > 0.0f0
-                        end, neighs
-                    )
-                end
-            end
-
-            # making sure that only reciprocal links are found
-            for i = 1:length(graph)
-                graph[i] = filter(
-                    j -> (i == j) || (i in graph[j]), graph[i]
-                )
-            end
-            for i = length(graph):-1:1
-                graph[i] = filter(
-                    j -> (i == j) || (i in graph[j]), graph[i]
-                )
-            end
-
-            verbose && println("[DONE] $(time() - t0) seconds elapsed")
-
-            verbose && println("Running DFS...")
-            t0 = time()
-
-            start_node = argmin(
-                sum(
-                    (centers .- interior_reference) .^ 2; dims = 1
-                ) |> vec
-            )
-
-            is_wet = dfs(graph, start_node)
-
-            in_domain .= false
-            in_domain[is_wet] .= true
-
-            verbose && println("[DONE] $(time() - t0) seconds elapsed")
-        end
-
-        verbose && println("Filtering interior and ghost cells...")
-        t0 = time()
-
-        let mask = falses(ncells)
-            @. mask = mask || in_domain
-
-            for (_, dists) in family_distances
-                is_ghost = @. dists < ghost_layer_ratio * radii * 2
-                @. mask = mask || is_ghost
-            end
-
-            mask = findall(mask)
-
-            origins = origins[:, mask]
-            centers = centers[:, mask]
-            cell_widths = cell_widths[:, mask]
-            in_domain = in_domain[mask]
-            family_distances = Dict(
-                sname => dists[mask] for (sname, dists) in family_distances
-            )
-            family_projections = Dict(
-                sname => projs[:, mask] for (sname, projs) in family_projections
+                map(t -> t[1], ows) |> x -> reduce(hcat, x),
+                map(t -> t[2], ows) |> x -> reduce(hcat, x),
             )
         end
 
-        verbose && println("[DONE] $(time() - t0) seconds elapsed")
+        verbose && println("[DONE] - $(time() - t0) seconds elapsed")
 
-        verbose && println("====$(length(in_domain)) cells in $(time() - t0_global) seconds====")
+        verbose && println("==Done with block-mesh generation procedure!==")
 
         Mesh(
-            origins, cell_widths, centers, in_domain,
-            family_distances, family_projections,
-            stl_families
+            origin, widths,
+            block_size,
+            block_origins, block_widths,
+            dfields,
         )
     end
+
+    _range_prod(ranges::Union{AbstractVector, AbstractRange}...) = Base.Iterators.product(
+        ranges...
+    ) |> collect |> vec
+    _range_prod(range::Union{AbstractVector, AbstractRange}, N::Int) = _range_prod(
+        fill(range, N)...
+    )
 
     """
     $TYPEDSIGNATURES
 
-    Write cells to VTK file. Kwargs are written as cell data.
+    Obtain all points in a given range of partitions of a mesh
+    (default: all). 
 
-    If `write_families = true`, name `fname * "_" * fam_name` is used
-    for each surface family .vtu file. Saving is automatic.
+    Returns cell centers, widths and boolean masks indicating whether the cell
+    is in the margin of a block. Centers and widths have shape `(ndims, npts)`.
+    """
+    function get_cells(
+        msh::Mesh, range = nothing;
+        margin::Int = 0
+    )
+        if isnothing(range)
+            range = 1:size(msh.block_widths, 2)
+        end
+
+        block_origins = msh.block_origins[:, range]
+        block_widths = msh.block_widths[:, range]
+
+        margin = Int32(margin)
+        nd = size(block_origins, 1)
+        n_per_block = (msh.block_size + 2 * margin) ^ nd
+
+        inner_coordinates = _range_prod(
+            (
+                (0.5f0 - margin):1.0f0:(msh.block_size + margin - 0.5f0)
+            ) ./ msh.block_size, nd
+        ) |> x -> collect.(x) |> x -> reduce(hcat, x)
+
+        centers = map(
+            (o, w) -> inner_coordinates .* w .+ o,
+            eachcol(block_origins), eachcol(block_widths)
+        ) |> x -> reduce(hcat, x)
+        widths = repeat(
+            block_widths ./ msh.block_size;
+            inner = (1, n_per_block)
+        )
+
+        is_margin = let im = trues(n_per_block)
+            k = 0
+            for idxs in _range_prod(
+                (1 - margin):(msh.block_size + margin), nd
+            )
+                k += 1
+
+                if all(idxs .>= 1) && all(
+                    idxs .<= msh.block_size
+                )
+                    im[k] = false
+                end
+            end
+
+            repeat(im; outer = size(block_origins, 2))
+        end
+
+        (centers, widths, is_margin)
+    end
+
+    _fix_export(v::AbstractVector) = v
+    _fix_export(a::AbstractArray) = (
+        size(a, ndims(a)) > size(a, 1) ?
+        a :
+        let s = 1:ndims(a) |> collect
+            circshift!(s, -1)
+
+            permutedims(a, tuple(s...))
+        end
+    )
+
+    _sellast(v::AbstractArray, i) = selectdim(
+        v, ndims(v), i
+    ) |> copy
+
+    """
+    $TYPEDSIGNATURES
+
+    Create folder with name `fname` with multi-block VTK file.
+    kwargs are exported as volume data.
+
+    Only a given set of partitions may be exported if indices `partition_indices`
+        are specified.
     """
     function WriteVTK.vtk_grid(
-        fname::String, msh::Mesh; 
-        write_families::Bool = false,
+        fname::String, msh::Mesh,
+        partition_indices = nothing; 
+        _make_folder::Bool = true,
         kwargs...
     )
-        nd = size(msh.origins, 1)
-        ncorners = 2 ^ nd
+        nd = size(msh.block_origins, 1)
+        nblocks = size(msh.block_origins, 2)
+        nperblock = msh.block_size ^ nd
 
-        ctype = (
-            nd == 2 ? VTKCellTypes.VTK_PIXEL : VTKCellTypes.VTK_VOXEL
-        )
-
-        multipliers = mapreduce(
-            collect, hcat,
-            Iterators.product(
-                fill((0, 1), nd)...
-            )
-        )
-
-        points = map(
-            (o, w) -> multipliers .* w .+ o,
-            eachcol(msh.origins), eachcol(msh.widths)
-        ) |> x -> reduce(hcat, x)
-
-        mcells = MeshCell[]
-        _conn = collect(1:ncorners)
-        for k = 1:size(msh.centers, 2)
-            conn = _conn .+ ((k - 1) * ncorners)
-
-            push!(
-                mcells,
-                MeshCell(ctype, conn)
-            )
+        if isnothing(partition_indices)
+            partition_indices = 1:nblocks
         end
 
-        grid = vtk_grid(fname, points, mcells)
-        for (k, v) in kwargs
-            if v isa AbstractArray
-                if size(v, ndims(v)) == length(mcells)
-                    grid[String(k)] = v
-                else
-                    grid[String(k)] = permutedims(v)
-                end
-            else
-                grid[String(k)] = v
+        if _make_folder
+            if isdir(fname)
+                @warn "Overwriting volume output in folder $fname."
+                rm(fname; recursive = true, force = true)
+            end
+            mkdir(fname)
+        end
+
+        vtm = joinpath(fname, "VOLUME") |> vtk_multiblock
+
+        for block in partition_indices
+            o = msh.block_origins[:, block]
+            w = msh.block_widths[:, block]
+
+            grid = vtk_grid(
+                vtm, [
+                    LinRange(o[dim], o[dim] + w[dim], msh.block_size + 1) for dim = 1:nd
+                ]...
+            )
+
+            block_range = (
+                (block - 1) * nperblock + 1
+            ): (
+                nperblock * block
+            )
+
+            for (k, v) in kwargs
+                v = _fix_export(v)
+                grid[String(k)] = _sellast(v, block_range)
             end
         end
 
-        grid["in_domain"] = Float64.(msh.in_domain)
-        for family in keys(msh.family_distances)
-            grid[family * "_distances"] = msh.family_distances[family]
-            grid[family * "_projections"] = msh.family_projections[family]
-        end
-
-        if write_families
-            for (sname, stl) in msh.families
-                vtk = vtk_grid(
-                    fname * "_" * sname, stl
-                )
-                vtk_save(vtk)
-            end
-        end
-
-        grid
+        vtm
     end
-
-    """
-    $TYPEDSIGNATURES
-
-    Get mesh size
-    """
-    Base.length(msh::Mesh) = size(msh.centers, 2)
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain partition of a mesh based on cell indices
-    """
-    Base.getindex(msh::Mesh, idxs) = Mesh(
-        msh.origins[:, idxs], msh.widths[:, idxs],
-        msh.centers[:, idxs], msh.in_domain[idxs],
-        Dict(
-            [fam => dists[idxs] for (fam, dists) in msh.family_distances]
-        ),
-        Dict(
-            [fam => projs[:, idxs] for (fam, projs) in msh.family_projections]
-        ),
-        msh.families
-    )
 
 end

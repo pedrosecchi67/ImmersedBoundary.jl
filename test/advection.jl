@@ -15,7 +15,7 @@ upper = Stereolitography(
     ]; closed = false
 )
 
-msh = Mesh(
+dom = Domain(
     [0.0, 0.0],
     [1.0, 1.0],
     ("lower", lower, 1e-2),
@@ -23,12 +23,8 @@ msh = Mesh(
     refinement_regions = [
         (Line([0.0, 0.0], [1.0, 1.0]), 1e-2),
     ],
-    interior_reference = [0.5, 0.5],
     verbose = true,
 )
-
-dom = Domain(msh;
-    max_partition_size = 1000)
 
 u = zeros(length(dom))
 
@@ -83,7 +79,7 @@ march_implicit! = u -> begin
         n_hutchinson_samples = 30)
 
     ds, _ = solve(A, b, prec;
-        n_iter = 100, rtol = 1e-2,
+        n_iter = 100, rtol = 1e-1,
         verbose = true,
         multigrid = mgrid)
 
@@ -96,7 +92,7 @@ end
 
 export_vtk(
     "advection", dom;
-    include_surface = false,    
+    export_surface = false,    
     u = u,
 )
 

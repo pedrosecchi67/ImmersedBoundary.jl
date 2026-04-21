@@ -26,7 +26,7 @@ freestream_bc = FlowBC(
     fluid, P∞
 )
 
-msh = Mesh(
+dom = Domain(
     [0.0, 0.0], [1.0, 1.0],
     ("wall", wall_stl, h);
     hypercube_families = [
@@ -34,11 +34,8 @@ msh = Mesh(
             (1, false), (1, true), (2, true)
         ]
     ],
-    interior_reference = [0.5, 0.05],
     verbose = true,
 )
-
-dom = Domain(msh)
 
 P = repeat(
     P∞'; inner = (length(dom), 1)
@@ -214,7 +211,7 @@ if !isnothing(Ravg.μ) # precaution for testing with fewer iterations
 end
 
 wall = dom.surfaces["wall"]
-Ps = at_offset(wall, P)
+Ps = wall(P)
 y = wall.offsets
 
 p = @view Ps[:, 1]
