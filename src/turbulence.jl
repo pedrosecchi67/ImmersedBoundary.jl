@@ -11,9 +11,13 @@ module Turbulence
     function vector_binary_search(
         q::AbstractVector, u::AbstractVector
     )
-        i1 = ones(Int64, length(q))
-        i2 = fill(length(u), length(q))
-        complete = falses(length(q))
+        i1 = similar(q, Int32, length(q))
+        i2 = similar(q, Int32, length(q))
+        i1 .= 1
+        i2 .= length(q)
+
+        complete = similar(q, Bool, length(q))
+        complete .= false
 
         im = similar(i1)
         while !all(complete)

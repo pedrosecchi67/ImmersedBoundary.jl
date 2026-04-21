@@ -412,3 +412,12 @@ using ImmersedBoundary.IBL
 m_closure
 θ_closure
 ```
+
+# Other types in custom array backens
+
+Most data types support method `to_backend`:
+
+```julia
+wf = WallFunction()
+wf = ImmersedBoundary.to_backend(wf, x -> cu(x))
+```
