@@ -664,6 +664,8 @@ $(nblocks * block_size ^ nd) cells""")
                     x, conv_to_backend
                 ), args
             )
+
+            image = part.image
             part = to_backend(part, conv_to_backend)
 
             pargs = part.interpolator.(pargs)
@@ -672,7 +674,7 @@ $(nblocks * block_size ^ nd) cells""")
             for (a, pa) in zip(args, pargs)
                 pa = selectdim(pa, 1, part.image_in_domain) |> copy
                 
-                selectdim(a, 1, part.image) .= to_backend(
+                selectdim(a, 1, image) .= to_backend(
                     pa, conv_from_backend
                 )
             end
