@@ -67,25 +67,17 @@ stl = merge_points(stl1, stl2; tolerance = 1e-5)
 # Mesh generation
 
 ```julia
-struct Mesh
-    origins::Matrix{Float32}
-    widths::Matrix{Float32}
-    centers::Matrix{Float32}
-    in_domain::Vector{Bool}
-    family_distances::Dict{String, Vector{Float32}}
-    family_projections::Dict{String, Matrix{Float32}}
-    families::Dict{String, Stereolitography}
-end
-
-function Mesh(
+function Domain(
     origin::AbstractVector, widths::AbstractVector,
-    surfaces::Tuple...;
-    interior_reference::Union{AbstractVector, Nothing} = nothing,
-    growth_ratio::Real = 1.1,
-    ghost_layer_ratio::Real = 1.5,
-    refinement_regions = [],
+    surfaces...;
+    growth_ratio::Real = 2.0f0,
+    tolerance::Real = 1f-7,
+    block_size::Int = 8,
+    refinement_regions::AbstractVector = [],
+    margin::Int = 2,
+    max_partition_size::Int = 1_000_000,
+    ghost_layer_ratio::Real = 1.5f0,
     hypercube_families = [],
-    merge_tolerance::Real = 1e-7,
     verbose::Bool = false,
 )
 ```
@@ -107,14 +99,9 @@ Generate an octree/quadtree mesh described by:
         Mesher.Line([1.0, 0.0], [2.0, 0.0]) => 0.005
     ]
     ```
-* A cell growth ratio;
-* An interior point reference; and
+* A "cell growth ratio" for the octree/quadtree blocks, following Nakahashi's building-cubes method; and
 * A ghost layer ratio, which defines the thickness of the ghost cell layer
     within a solid as a ratio of the local cell circumdiameter.
-
-Family naming may be implemented by giving the same name string to several surfaces.
-Surfaces without family names ("", empty strings) will be considered merely
-a meshing resource, not a boundary.
 
 Hypercube boundary family names may be specified by:
 
@@ -135,28 +122,26 @@ hypercube_families = [
 ]
 ```
 
-# Domain definition 
-
-```julia
-function Domain(
-    msh::Mesh;
-    stencil = nothing,
-    max_partition_size::Int = 100_000,
-    ghost_layer_ratio::Real = 1.5,
-)
-```
-
-Constructor for a domain.
-
-`ghost_layer_ratio` is the ratio between image point distances to the wall and the
-ghost cells' circumradiameters.
-
 Example:
 
 ```julia
-dom = Domain(msh)
+stl = Stereolitography("rae2822.dat")
+features = feature_regions(stl; radius = 0.05)
+feature_dfield = DistanceField(features)
 
-export_vtk("domain", dom) # check it out :)
+dom = Domain(
+    [-40.0, -40.0],
+    [80.0, 80.0],
+    ("wall", stl, 4e-3);
+    refinement_regions = [
+        (feature_dfield, 0.5e-3),
+    ],
+    hypercube_families = [
+        "freestream" => [(1, false), (1, true), (2, false), (2, true)],
+    ],
+    max_partition_size = 2000,
+    verbose = true
+)
 
 @show ndims(dom) # dimensionality
 @show length(dom) # number of cells
@@ -165,40 +150,49 @@ export_vtk("domain", dom) # check it out :)
 # Calculating residuals
 
 ```julia
-(dom::Domain)(
-    f, args::AbstractArray...; 
-    n_threads::Int = 1,
+function (dom::Domain)(
+    f,
+    args::AbstractArray...; 
+    conv_to_backend = identity,
+    conv_from_backend = identity,
+    nthreads::Int = 1,
     kwargs...
 )
 ```
 
-Run a loop over the partitions of a domain and
-execute operations.
+Run function on all partitions of a domain.
 
 Example:
 
 ```julia
-domain(r, u) do partition, rdom, udom
-    # udom includes the parts of vector `u`
-    # which affect the residual at partition `partition`.
+domain(A, B) do part, A, B # here, A, B indicate arrays
+    # selected to partition part, with padding for finite difference ops.
 
-    # now do some Cartesian grid operations and
-    # update rdom
+    # now we do whatever we want with them! We can edit them in-place, too
+
+    r # return values are gathered in an array and returned.
 end
-
-# after the loop, the values of `rdom` are returned to
-# array `r`
 ```
 
-This allows for large operations on field data
-to be performed one partition at a time,
-saving on max. memory usage.
+In these arrays, the first index is always expected to correspond to the cell 
+index.
 
-Return values are also stored in a vector, which is
-then returned.
-Kwargs are passed to the called function.
+Kwargs are passed as they are to the evaluation function.
 
-Ran with `n_threads` treads.
+Conversion functions `conv_to_backend` and `conv_from_backend` may be passed to
+convert arrays (and partitions) to a custom array backend before any operations.
+
+Example:
+
+```julia
+# for CuArrays:
+using CUDA
+
+conv_to_backend = x -> cu(x)
+conv_from_backend = x -> Array(x)
+```
+
+`nthreads` may be specified to allow for multi-threading between partitions.
 
 # Grid operators
 
@@ -216,22 +210,6 @@ domain(u, ux) do part, u, ux # values at local domain
 end
 
 # ux is now the first, x-axis derivative of u
-```
-
-The remaining fields of `Partition` include:
-
-```julia
-struct Partition
-    index::Int64
-    image::AbstractVector
-    image_in_domain::AbstractVector
-    skirt_indices::AbstractVector
-    domain::AbstractVector
-    stencils::AbstractDict
-    centers::AbstractMatrix # (ncells, ndims)
-    spacing::AbstractMatrix # (ncells, ndims)
-    boundaries::Dict{String, Boundary}
-end
 ```
 
 ```julia
@@ -314,26 +292,13 @@ We may directly return ghost cell values rather than boundary values
 by activating flag `impose_at_ghost`.
 
 ```julia
-struct Boundary
-    points::AbstractMatrix # (npoints, ndims)
-    normals::AbstractMatrix # (npoints, ndims)
-    ghost_indices::AbstractVector
-    ghost_distances::AbstractVector
-    image_distances::AbstractVector
+struct Boundary{Ti, Tf}
+    ghost_indices::AbstractVector{Ti}
+    ghost_distances::AbstractVector{Tf}
+    image_distances::AbstractVector{Tf}
+    points::AbstractMatrix{Tf}
+    normals::AbstractMatrix{Tf}
     image_interpolator::NNInterpolator.Accumulator
-    boundary_interpolator::NNInterpolator.Accumulator
-end
-```
-
-You can also obtain the values of field properties at the exact boundary
-projection of each ghost cell by using the boundary as a callable object:
-
-```julia
-impose_bc!(part, "family", u) do bdry, u_at_image
-    u_at_boundary = bdry(u) # note that the full array, not the image interpolation,
-    # is the input
-
-    unew
 end
 ```
 
@@ -382,19 +347,16 @@ surf = dom.surfaces["wall"]
 Cp_wall = surf(Cp) # interpolate array of field properties to wall
 
 CX, CY = surface_integral(
-    surf, Cp_wall .* surf.normals # surf.centers is also available
+    surf, Cp_wall .* surf.normals # surf.points is also available
 )
 ```
 
-Values may also be obtained an offset away from the surface in order to obtain
-values like `τ` at the wall in wall-modelled simulations:
+Values are obtained an offset away from the surface (see `surf.offsets`) in order to obtain values like `τ` at the wall in wall-modelled simulations.
 
 ```julia
 surf = dom.surfaces["wall"]
 
-τ = μ .* (
-    at_offset(surf, V) .- surf(V)
-) ./ surf.offsets # wall-normal gradient
+τ = μ .* surf(V) ./ surf.offsets # wall-normal gradient
 ```
 
 To export, the kwarg `surface_data` is available in `export_vtk`:
@@ -405,7 +367,7 @@ export_vtk("destination", domain;
         "wall" => (
             Cp = wall(Cp), # example
             τ = μ .* (
-                at_offset(wall, V) .- wall(V)
+                wall(V)
             ) ./ surf.offsets
         ),
         "other_wall" => (
@@ -443,26 +405,10 @@ using ImmersedBoundary.Turbulence
 WallFunction
 shear_rate
 Smagorinsky_νSGS
+Wray_Argawal
 
 using ImmersedBoundary.IBL
 
 m_closure
 θ_closure
-```
-
-# Custom array backends/GPUs
-
-```julia
-dom(part, Q) do part, Q
-    # port partition to array backend
-    cpart = to_backend(part, x -> CuArray(x))
-    cQ = cu(Q)
-
-    # run ops. on GPU
-
-    Q .= Array(cQ)
-end
-
-# or, if your GPU supports the whole domain:
-cdom = to_backend(dom, x -> CuArray(x))
 ```

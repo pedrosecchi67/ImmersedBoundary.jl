@@ -293,6 +293,16 @@ module PointImplicit
                 x .+= s .* α
                 r .-= As .* α
 
+                # second iteration: residual itself
+                s .= r ./ (
+                    ϵ + maximum(abs, r)
+                )
+
+                α, As = proj_along(A, s, r)
+
+                x .+= s .* α
+                r .-= As .* α
+
                 nr = norm(r)
 
                 verbose && println(

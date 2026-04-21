@@ -6,22 +6,19 @@ stl = Stereolitography("rae2822.dat")
 features = feature_regions(stl; radius = 0.05)
 feature_dfield = DistanceField(features)
 
-msh = Mesh(
+dom = Domain(
     [-40.0, -40.0],
     [80.0, 80.0],
     ("wall", stl, 4e-3);
     refinement_regions = [
         (feature_dfield, 0.5e-3),
     ],
-    interior_reference = [2.0, 2.0],
     hypercube_families = [
         "freestream" => [(1, false), (1, true), (2, false), (2, true)],
     ],
+    max_partition_size = 2000,
     verbose = true
 )
-
-dom = Domain(msh;
-    max_partition_size = length(msh) ÷ 2)
 
 M∞ = 0.72f0
 fluid, P∞ = ISA_atmosphere(
@@ -136,8 +133,6 @@ for _ = 1:100
         impose_bc!(part, "wall", k) do bdry, ki
             kb = similar(ki)
             kb .= 1
-
-            k_at_bdry = bdry(k)
 
             kb
         end
