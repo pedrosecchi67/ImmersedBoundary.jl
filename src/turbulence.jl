@@ -14,7 +14,7 @@ module Turbulence
         i1 = similar(q, Int32, length(q))
         i2 = similar(q, Int32, length(q))
         i1 .= 1
-        i2 .= length(q)
+        i2 .= length(u)
 
         complete = similar(q, Bool, length(q))
         complete .= false
