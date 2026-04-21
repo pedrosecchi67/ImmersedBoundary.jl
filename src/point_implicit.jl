@@ -248,7 +248,7 @@ module PointImplicit
     `n_inner` iterations are ran per multigrid level.
     """
     function solve(
-        A::Linearization, b::AbstractVector,
+        A::Linearization, b::AbstractVecOrMat,
         prec::PIPreconditioner;
         n_iter::Int = 100,
         n_inner::Int = 1,
