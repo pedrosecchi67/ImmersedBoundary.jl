@@ -77,9 +77,10 @@ module ImmersedBoundary
     function Boundary(
             ghosts::AbstractVector{Ti}, projs::AbstractMatrix{Tf}, 
             centers::AbstractMatrix{Tf}, radii::AbstractVector{Tf},
-            ptree::KDTree; ghost_layer_ratio::Real = 1.5f0
+            ptree::KDTree, centers_nonfringe::AbstractMatrix{Tf}; 
+            ghost_layer_ratio::Real = 1.5f0
     ) where {Ti, Tf}
-        ϵ = eps(Tf)
+        ϵ = 1f-14 # eps(Tf)
 
         normals = centers[ghosts, :] .- projs
         ghost_distances = sum(normals .^ 2; dims = 2) |> vec |> x -> sqrt.(x) .+ ϵ
@@ -87,7 +88,7 @@ module ImmersedBoundary
 
         image_distances = 2 .* radii[ghosts] .* ghost_layer_ratio
 
-        image_interpolator = Interpolator(centers, projs .+ image_distances .* normals, ptree; 
+        image_interpolator = Interpolator(centers_nonfringe, projs .+ image_distances .* normals, ptree; 
                                           first_index = true, linear = true)
         NNInterpolator.ArrayAccumulator.change_data_types!(image_interpolator, Ti, Tf)
 
@@ -108,7 +109,8 @@ module ImmersedBoundary
     """
     function Boundary(
             msh::Mesh, bname::String,
-            part::Partition{Ti, Tf}, ptree::KDTree; ghost_layer_ratio::Real = 1.5f0
+            part::Partition{Ti, Tf}, ptree::KDTree, centers_nonfringe::AbstractMatrix{Tf}; 
+            ghost_layer_ratio::Real = 1.5f0
     ) where {Ti, Tf}
         centers = part.centers
         radii = sum(part.spacing .^ 2; dims = 2) |> vec |> x -> sqrt.(x) ./ 2
@@ -159,7 +161,7 @@ module ImmersedBoundary
             projs = Matrix{Tf}(undef, 0, nd)
         end
 
-        Boundary(ghosts, projs, centers, radii, ptree;
+        Boundary(ghosts, projs, centers, radii, ptree, centers_nonfringe;
             ghost_layer_ratio = ghost_layer_ratio)
     end
 
@@ -169,7 +171,7 @@ module ImmersedBoundary
     Constructor for a boundary from hypercube faces.
     """
     function Boundary(
-            msh::Mesh, part::Partition{Ti, Tf}, ptree::KDTree,
+            msh::Mesh, part::Partition{Ti, Tf}, ptree::KDTree, centers_nonfringe::AbstractMatrix{Tf},
             faces::Tuple{Int, Bool}...; ghost_layer_ratio::Real = 1.5f0
     ) where {Ti, Tf}
         origin = msh.origin
@@ -213,7 +215,7 @@ module ImmersedBoundary
 
         projs = projs[ghosts, :]
 
-        Boundary(ghosts, projs, centers, radii, ptree;
+        Boundary(ghosts, projs, centers, radii, ptree, centers_nonfringe;
             ghost_layer_ratio = ghost_layer_ratio)
     end
 
@@ -266,17 +268,19 @@ module ImmersedBoundary
             Dict{String, Boundary{Ti, Tf}}()
         )
 
-        let ptree = KDTree(centers')
+        let centers_nonfringe = centers[part.image_in_domain, :]
+            ptree = KDTree(centers_nonfringe')
+
             for bname in msh.distance_fields |> keys
                 part.boundaries[bname] = Boundary(
-                    msh, bname, part, ptree;
+                    msh, bname, part, ptree, centers_nonfringe;
                     ghost_layer_ratio = ghost_layer_ratio
                 )
             end
 
             for (bname, faces) in hypercube_families
                 part.boundaries[bname] = Boundary(
-                    msh, part, ptree, faces...;
+                    msh, part, ptree, centers_nonfringe, faces...;
                     ghost_layer_ratio = ghost_layer_ratio
                 )
             end
@@ -445,7 +449,7 @@ module ImmersedBoundary
         surfaces::Pair{String, Stereolitography}...;
         ghost_layer_ratio::Real = 1.5f0
     ) where {Ti, Tf}
-        ϵ = eps(Tf)
+        ϵ = 1f-14 # eps(Tf)
         tree = dom.tree
         
         h = zeros(Tf, length(dom))
@@ -748,7 +752,10 @@ $(nblocks * block_size ^ nd) cells""")
         η = bdry.ghost_distances ./ bdry.image_distances
         ginds = bdry.ghost_indices
 
-        iargs = intp.(args)
+        iargs = map(
+            a -> selectdim(a, 1, part.image_in_domain) |> intp, 
+            args
+        )
         gargs = map(
             a -> selectdim(a, 1, ginds), args
         )
