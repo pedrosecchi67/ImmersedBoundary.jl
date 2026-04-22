@@ -544,7 +544,7 @@ module BlockMesher
     function proj2simplex(
         simplex::AbstractMatrix, pt::AbstractVector
     )
-        ϵ = eps(eltype(simplex))
+        ϵ = 1f-14 # eps(eltype(simplex))
 
         if size(simplex, 2) == 1
             return vec(simplex)
@@ -600,7 +600,7 @@ module BlockMesher
     """
     function _simplex_normal(simplex::AbstractMatrix, normalize::Bool = true)
 
-        ϵ = eps(eltype(simplex))
+        ϵ = 1f-14 # eps(eltype(simplex))
 
         if size(simplex, 1) == 2
             v = simplex[:, 2] .- simplex[:, 1]
