@@ -244,7 +244,7 @@ module ImmersedBoundary
         Ti = (ncells_total > 1e9 ? Int64 : Int32)
 
         interp = Interpolator(X, centers, tree;
-            first_index = true, linear = false)
+            first_index = true, linear = true)
 
         in_domain = @. !is_margin
 
