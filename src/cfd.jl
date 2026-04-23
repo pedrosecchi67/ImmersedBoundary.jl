@@ -159,7 +159,9 @@ module CFD
     """
     struct FlowBC
         fluid::Fluid
-        P::AbstractVector
+        p∞::Real
+        T∞::Real
+        u∞::AbstractVector
         normal_flow::Bool
     end
 
@@ -229,7 +231,7 @@ module CFD
         P::AbstractVector;
         normal_flow::Bool = false
     ) = FlowBC(
-        fluid, P, normal_flow
+        fluid, P[1], P[2], P[3:end], normal_flow
     )
 
     """
@@ -244,14 +246,14 @@ module CFD
         du!dn::Union{Nothing, AbstractVector} = nothing,
         transpiration::Union{Real, AbstractVector} = 0.0f0,
     )
-        p∞ = bc.P[1]
-        T∞ = bc.P[2]
-        u∞ = bc.P[3:end]
+        p∞ = bc.p∞
+        T∞ = bc.T∞
+        u∞ = bc.u∞
 
         if bc.normal_flow
-            @assert length(bc.P) == 3 "Only 3 parcels (p, T and normal flow) allowed for normal_flow = true BC"
+            @assert length(bc.u∞) == 1 "Only 3 parcels in P (p, T and normal flow) allowed for normal_flow = true BC"
             un = similar(P, (size(P, 1),))
-            un .= u∞[1]
+            un .= u∞
         else
             un = normals * u∞
         end

@@ -1202,6 +1202,8 @@ $(nblocks * block_size ^ nd) cells""")
     include("cfd.jl")
     using .CFD
 
+    @declare_converter CFD.FlowBC
+
     include("turbulence.jl")
     using .Turbulence
 
