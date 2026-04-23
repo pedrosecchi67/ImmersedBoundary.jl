@@ -971,7 +971,7 @@ module BlockMesher
     """
     function Mesh(
         origin::AbstractVector, widths::AbstractVector,
-        surfaces...;
+        surfaces::Tuple...;
         growth_ratio::Real = 2.0f0,
         tolerance::Real = 1f-7,
         block_size::Int = 8,

@@ -305,7 +305,10 @@ module ImmersedBoundary
         stl::Stereolitography
     end
 
-    @declare_converter Surface
+    @declare_converter Surface{Int32, Float32}
+    @declare_converter Surface{Int64, Float32}
+    @declare_converter Surface{Int32, Float64}
+    @declare_converter Surface{Int64, Float64}
 
     """
     $TYPEDFIELDS
