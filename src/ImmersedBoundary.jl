@@ -25,7 +25,7 @@ module ImmersedBoundary
         Box, Ball, Line, DistanceField,
         feature_regions,
         export_vtk,
-        Domain, impose_bc!,
+        Domain, MultigridDomain, impose_bc!,
         Interpolator, 
         ∇, Δ, δ, μ, MUSCL, laplacian_smoothing,
         getalong,
@@ -439,6 +439,93 @@ module ImmersedBoundary
         NNInterpolator.Interpolator(
             _X, Xc, tree; linear = linear, k = k,
             first_index = true
+        )
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain interpolator from one domain to another.
+
+    Kwargs can specify if linear interpolation is used (def. `linear = true`)
+    and the number of points for interpolation (def. `k = 2 ^ N`).
+    """
+    function NNInterpolator.Interpolator(
+        src::Domain{Ti, Tf}, dst::Domain{Ti2, Tf2};
+        linear::Bool = true, k::Int = 0,
+    ) where {Ti, Tf, Ti2, Tf2}
+        Xc = zeros(Tf2, length(dst), ndims(dst))
+
+        dst(Xc) do part, Xc
+            Xc .= part.centers
+        end
+
+        NNInterpolator.Interpolator(
+            src, Xc; linear = linear, k = k,
+        )
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Build domains and coarseners/prolongators for multigrid.
+    Takes the same arguments as `Domain()`.
+    Example:
+
+    ```
+    domain, coarse_domains, coarseners, prolongators = MultigridDomain(
+        3, # 3 mgrid levels
+        origins, widths, surfaces; kwargs...
+    )
+    ```
+
+    `coarseners[i]` and `prolongators[i]` are callable objects that interpolate any
+    field property from level `i-1` to level `i`.
+    """
+    function MultigridDomain(
+        n_levels::Int,
+        origin::AbstractVector, widths::AbstractVector,
+        surfaces...;
+        factor::Int = 2,
+        refinement_regions::AbstractVector = [],
+        verbose::Bool = false, kwargs...
+    )
+        domains = Domain[]
+        coarseners = NNInterpolator.ArrayAccumulator.Accumulator[]
+        prolongators = NNInterpolator.ArrayAccumulator.Accumulator[]
+
+        gen_new = (refinement_regions, surfaces) -> begin
+            verbose && println("Building multigrid level $(length(domains))...")
+
+            dom = Domain(origin, widths, surfaces...; 
+                refinement_regions = refinement_regions, 
+                verbose = verbose, kwargs...)
+
+            if length(domains) > 0
+                push!(
+                    coarseners,
+                    Interpolator(domains[end], dom)
+                )
+                push!(
+                    prolongators,
+                    Interpolator(dom, domains[end])
+                )
+            end
+
+            push!(domains, dom)
+
+            (
+                [(sdf => h * factor) for (sdf, h) in refinement_regions],
+                [(sname, stl, h * factor) for (sname, stl, h) in surfaces]
+            )
+        end
+
+        for _ = 1:(n_levels + 1)
+            refinement_regions, surfaces = gen_new(refinement_regions, surfaces)
+        end
+
+        (
+            domains[1], domains[2:end], coarseners, prolongators
         )
     end
 

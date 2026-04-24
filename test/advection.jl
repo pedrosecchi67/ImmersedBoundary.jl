@@ -15,7 +15,8 @@ upper = Stereolitography(
     ]; closed = false
 )
 
-dom = Domain(
+dom, coarse_doms, coarseners, prolongators = MultigridDomain(
+    4,
     [0.0, 0.0],
     [1.0, 1.0],
     ("lower", lower, 1e-2),
@@ -32,62 +33,81 @@ Cx = 1.0
 Cy = 1.0
 
 # timescale for BC imposition
-τ = dom() do part
+timescale = dom -> dom() do part
     minimum(
         part.spacing ./ [Cx Cy]
     ) / 2
 end |> minimum
-τ *= 0.5 # CFL
 
-Δt = 0.2
-
-march! = (u, dt) -> begin
-    dom(u) do part, u
-        u .+= - (
+udot = (dom, u, dt) -> let unew = copy(u)
+    dom(u, unew) do part, u, unew
+        unew .+= - (
             ∇(part, u, 1) .* Cx .+
             ∇(part, u, 2) .* Cy
         ) .* dt
 
-        impose_bc!(part, "upper", u) do bdry, u
-            ub = similar(u)
-            ub .= 1.0
-
-            ub
+        impose_bc!(part, "upper", unew) do bdry, unew
+            1.0f0
         end
 
-        impose_bc!(part, "lower", u) do bdry, u
-            ub = similar(u)
-            ub .= 0.0
-
-            ub
+        impose_bc!(part, "lower", unew) do bdry, unew
+            0.0f0
         end
     end
-end
-udot = u -> let unew = copy(u)
-    march!(unew, τ)
 
-    @. (unew - u) / τ
+    (unew .- u) ./ dt
 end
 
-mgrid = Multigrid(dom, 4)
+mgrid_correction = (
+    dom, u;
+    source = 0.0f0,
+    coarse_doms = [],
+    coarseners = [],
+    prolongators = [],
+    CFL::Real = 0.5,
+    n_iter::Int = 10,
+) -> let uold = copy(u)
+    τ = timescale(dom) * CFL
 
-march_implicit! = u -> begin
-    r = du -> udot(u .+ du) .* Δt .- du
+    if length(coarse_doms) > 0
+        cdom = coarse_doms[1]
+        coars = coarseners[1]
+        prolong = prolongators[1]
 
-    du = zeros(length(u))
-    A, b, prec = linearize(r, du;
-        n_hutchinson_samples = 30)
+        r = udot(dom, u, τ) .+ source
 
-    ds, _ = solve(A, b, prec;
-        n_iter = 100, rtol = 1e-1,
-        verbose = true,
-        multigrid = mgrid)
+        uc = coars(u)
+        rc = coars(r)
 
-    u .+= ds
+        τc = timescale(cdom) * CFL
+        P = rc .- udot(cdom, uc, τc)
+
+        u .+= mgrid_correction(cdom, uc;
+            source = P,
+            coarse_doms = coarse_doms[2:end],
+            prolongators = prolongators[2:end],
+            coarseners = coarseners[2:end],
+            CFL = CFL, n_iter = n_iter
+        ) |> prolong
+    end
+
+    for _ = 1:n_iter
+        u .+= (
+            source .+ udot(dom, u, τ)
+        ) .* τ
+    end
+    s = u .- uold
+    u .= uold
+
+    s
 end
 
-for _ = 1:10
-    march_implicit!(u)
+for _ = 1:5
+    u .+= mgrid_correction(dom, u;
+        coarseners = coarseners,
+        prolongators = prolongators,
+        coarse_doms = coarse_doms, 
+        n_iter = 25)
 end
 
 export_vtk(

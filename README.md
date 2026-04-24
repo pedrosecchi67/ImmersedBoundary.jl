@@ -337,6 +337,21 @@ u .+= s
 # this works with more variables in the columns of a matrix as well.
 ```
 
+# Explicit multigrid
+
+Function `MultigridDomain` is available to simultaneously build a few multigrid levels and the corresponding coarseners and prolongators. Example:
+
+```julia
+domain, coarse_domains, coarseners, prolongators = MultigridDomain(
+    3, # 3 mgrid levels
+    origins, widths, surfaces; kwargs...
+)
+# takes the same args and kwargs as Domain()
+```
+
+`coarseners[i]` and `prolongators[i]` are callable objects that interpolate any
+field property from level `i-1` to level `i`.
+
 # Postprocessing with surfaces
 
 Surfaces may be used for postprocessing and coefficient integration. Example:
@@ -413,11 +428,16 @@ m_closure
 θ_closure
 ```
 
-# Other types in custom array backens
+# Other types in custom array backends
 
 Most data types support method `to_backend`:
 
 ```julia
+using CUDA: cu
+
 wf = WallFunction()
 wf = ImmersedBoundary.to_backend(wf, x -> cu(x))
+
+bc = FlowBC(fluid, P)
+bc = ImmersedBoundary.to_backend(bc, x -> cu(x))
 ```
