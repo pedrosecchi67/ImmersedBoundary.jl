@@ -491,6 +491,115 @@ module CFD
         F
     end
 
+    """
+    $TYPEDSIGNATURES
+
+    Alternative inviscid fluxes with Rusanov-style artificial dissipation
+    according to sensors
+    """
+    function inviscid_fluxes(
+        fluid::Fluid, PL::AbstractMatrix, PR::AbstractMatrix, 
+        νL::AbstractVecOrMat, νR::AbstractVecOrMat,
+        dim::Union{AbstractMatrix, Number}
+    )
+        UcL = primitive2state(fluid, PL)
+        UcL[:, 2] .+= PL[:, 1] # pressure parcel
+
+        UcR = primitive2state(fluid, PR)
+        UcR[:, 2] .+= PR[:, 1] # pressure parcel
+
+        P = @. (PL + PR) / 2
+        p = @view P[:, 1]
+        T = @view P[:, 2]
+        u = (
+            dim isa Number ?
+            (@view P[:, 2 + dim]) : (sum(dim .* P[:, 3:end]; dims = 2) |> vec)
+        )
+
+        a = speed_of_sound(fluid, T)
+
+        F = @. (UcL + UcR) * u / 2
+
+        if dim isa Number
+            Fmom = @view F[:, 2 + dim]
+            @. Fmom += p
+        else
+            Fmom = @view F[:, 3:end]
+            @. Fmom += p * dim
+        end
+
+        @. F += (
+            UcL - UcR
+        ) * (
+            max(νL, νR) * (a + abs.(u)) / 2
+        )
+
+        F
+    end
+
+    export JST_sensor
+
+    """
+    $TYPEDSIGNATURES
+
+    JST-type sensor
+    """
+    function JST_sensor(
+        Pim1::AbstractVecOrMat, Pi::AbstractVecOrMat, Pip1::AbstractVecOrMat
+    )
+        ϵ = 1f-14
+
+        @. (
+            abs(Pim1 + Pip1 - 2 * Pi) + ϵ
+        ) / (
+            abs(Pim1 - Pi) + abs(Pip1 - Pi) + ϵ
+        )
+    end
+
+    export shock_sensor
+
+    """
+    $TYPEDSIGNATURES
+
+    Velocity-based shock sensor which avoids excessive dissipation in boundary layers
+    and advected vortices.
+
+    ```
+    ν = (∇⋅u² + ϵ) / (∇⋅u² + |∇×u|² + ϵ)
+    ```
+
+    Gradients given by a matrix such that `velocity_gradients[i, j]` is `∂uᵢ!∂xⱼ`.
+    """
+    function shock_sensor(
+        velocity_gradients::AbstractMatrix
+    )
+        ϵ = 1f-14
+
+        vortnorm2 = first(velocity_gradients) |> similar
+        divu = first(velocity_gradients) |> similar
+
+        vortnorm2 .= 0
+        divu .= 0
+
+        nd = size(velocity_gradients, 1)
+        for i = 1:nd
+            in = i % nd + 1
+            inn = in % nd + 1
+
+            divu .+= velocity_gradients[i, i]
+            vortnorm2 .+= (
+                velocity_gradients[inn, in] .-velocity_gradients[in, inn]
+            ) .^ 2
+        end
+
+        @. divu ^= 2
+        @. (
+            divu + ϵ
+        ) / (
+            divu + vortnorm2 + ϵ
+        )
+    end
+
     export Reynolds_number, adjust_Reynolds
 
     """

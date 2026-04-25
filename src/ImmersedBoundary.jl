@@ -642,7 +642,7 @@ module ImmersedBoundary
         block_size::Int = 8,
         refinement_regions::AbstractVector = [],
         margin::Int = 2,
-        max_partition_size::Int = 1_000_000,
+        max_partition_size::Int = 100_000,
         ghost_layer_ratio::Real = 1.5f0,
         hypercube_families = [],
         verbose::Bool = false,
