@@ -62,6 +62,7 @@ module ImmersedBoundary
         domain::AbstractVector{Ti}
         image::AbstractVector{Ti}
         image_in_domain::AbstractVector{Ti}
+        deduplication::AbstractVector{Ti}
         centers::AbstractMatrix{Tf}
         spacing::AbstractMatrix{Tf}
         boundaries::Dict{String, Boundary{Ti, Tf}}
@@ -77,7 +78,7 @@ module ImmersedBoundary
     function Boundary(
             ghosts::AbstractVector{Ti}, projs::AbstractMatrix{Tf}, 
             centers::AbstractMatrix{Tf}, radii::AbstractVector{Tf},
-            ptree::KDTree, centers_nonfringe::AbstractMatrix{Tf}; 
+            ptree::KDTree, centers_deduplicate::AbstractMatrix{Tf}; 
             ghost_layer_ratio::Real = 1.5f0
     ) where {Ti, Tf}
         ϵ = 1f-14 # eps(Tf)
@@ -88,7 +89,7 @@ module ImmersedBoundary
 
         image_distances = 2 .* radii[ghosts] .* ghost_layer_ratio
 
-        image_interpolator = Interpolator(centers_nonfringe, projs .+ image_distances .* normals, ptree; 
+        image_interpolator = Interpolator(centers_deduplicate, projs .+ image_distances .* normals, ptree; 
                                           first_index = true, linear = true)
         NNInterpolator.ArrayAccumulator.change_data_types!(image_interpolator, Ti, Tf)
 
@@ -109,7 +110,7 @@ module ImmersedBoundary
     """
     function Boundary(
             msh::Mesh, bname::String,
-            part::Partition{Ti, Tf}, ptree::KDTree, centers_nonfringe::AbstractMatrix{Tf}; 
+            part::Partition{Ti, Tf}, ptree::KDTree, centers_deduplicate::AbstractMatrix{Tf}; 
             ghost_layer_ratio::Real = 1.5f0
     ) where {Ti, Tf}
         centers = part.centers
@@ -161,7 +162,7 @@ module ImmersedBoundary
             projs = Matrix{Tf}(undef, 0, nd)
         end
 
-        Boundary(ghosts, projs, centers, radii, ptree, centers_nonfringe;
+        Boundary(ghosts, projs, centers, radii, ptree, centers_deduplicate;
             ghost_layer_ratio = ghost_layer_ratio)
     end
 
@@ -171,7 +172,7 @@ module ImmersedBoundary
     Constructor for a boundary from hypercube faces.
     """
     function Boundary(
-            msh::Mesh, part::Partition{Ti, Tf}, ptree::KDTree, centers_nonfringe::AbstractMatrix{Tf},
+            msh::Mesh, part::Partition{Ti, Tf}, ptree::KDTree, centers_deduplicate::AbstractMatrix{Tf},
             faces::Tuple{Int, Bool}...; ghost_layer_ratio::Real = 1.5f0
     ) where {Ti, Tf}
         origin = msh.origin
@@ -215,8 +216,35 @@ module ImmersedBoundary
 
         projs = projs[ghosts, :]
 
-        Boundary(ghosts, projs, centers, radii, ptree, centers_nonfringe;
+        Boundary(ghosts, projs, centers, radii, ptree, centers_deduplicate;
             ghost_layer_ratio = ghost_layer_ratio)
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain array of indices deduplicating a point cloud as per tolerance.
+    Prioritizes points in array `priority`
+    """
+    function deduplicate(X::AbstractMatrix, tolerance::Real, 
+        priority::AbstractVector{Ti}) where Ti
+        pt2tag = x -> Int64.(round.(x ./ tolerance))
+        Ttag = pt2tag(X[1, :]) |> typeof
+
+        d = Dict{Ttag, Ti}()
+        addpt! = i -> let tag = pt2tag(X[i, :])
+            if haskey(d, tag)
+                return
+            end
+            d[tag] = Ti(i);
+        end
+
+        map(addpt!, priority)
+        for i = 1:size(X, 1)
+            addpt!(i)
+        end
+
+        values(d) |> collect |> sort
     end
 
     """
@@ -228,6 +256,7 @@ module ImmersedBoundary
         msh::Mesh, block_range::AbstractRange, margin::Int,
         X::AbstractMatrix, tree::KDTree;
         id::Int = 0, ghost_layer_ratio::Real = 1.5f0,
+        tolerance::Real = 1f-7,
         hypercube_families = [],
     )
         centers, widths, is_margin = BlockMesher.get_cells(
@@ -260,27 +289,29 @@ module ImmersedBoundary
         NNInterpolator.re_index!(interp, hmap)
         NNInterpolator.ArrayAccumulator.change_data_types!(interp, Ti, Tf)
 
+        deduplication = deduplicate(centers, tolerance, image_in_domain)
+
         part = Partition{Ti, Tf}(
             id, margin, msh.block_size, block_range,
             interp,
-            domain, image, image_in_domain,
+            domain, image, image_in_domain, deduplication,
             centers, widths,
             Dict{String, Boundary{Ti, Tf}}()
         )
 
-        let centers_nonfringe = centers[part.image_in_domain, :]
-            ptree = KDTree(centers_nonfringe')
+        let centers_deduplicate = centers[part.deduplication, :]
+            ptree = KDTree(centers_deduplicate')
 
             for bname in msh.distance_fields |> keys
                 part.boundaries[bname] = Boundary(
-                    msh, bname, part, ptree, centers_nonfringe;
+                    msh, bname, part, ptree, centers_deduplicate;
                     ghost_layer_ratio = ghost_layer_ratio
                 )
             end
 
             for (bname, faces) in hypercube_families
                 part.boundaries[bname] = Boundary(
-                    msh, part, ptree, centers_nonfringe, faces...;
+                    msh, part, ptree, centers_deduplicate, faces...;
                     ghost_layer_ratio = ghost_layer_ratio
                 )
             end
@@ -369,6 +400,7 @@ module ImmersedBoundary
         margin::Int = 2,
         max_partition_size::Int = 100_000,
         ghost_layer_ratio::Real = 1.5f0,
+        tolerance::Real = 1f-7,
         hypercube_families = [],
         verbose::Bool = false,
     )
@@ -392,6 +424,7 @@ module ImmersedBoundary
                         msh, r, margin, X, tree; id = id, 
                         ghost_layer_ratio = ghost_layer_ratio,
                         hypercube_families = hypercube_families,
+                        tolerance = tolerance,
                     )
                     
                     verbose && lock(lck) do
@@ -680,6 +713,7 @@ $(nblocks * block_size ^ nd) cells""")
                 max_partition_size = max_partition_size, margin = margin,
                 ghost_layer_ratio = ghost_layer_ratio, 
                 hypercube_families = hypercube_families,
+                tolerance = tolerance,
                 verbose = verbose
             )
 
@@ -785,6 +819,10 @@ $(nblocks * block_size ^ nd) cells""")
     $TYPEDSIGNATURES
 
     Impose boundary condition on domain array.
+    *NOTE: this function is only guaranteed to work on arrays with 
+    their fringe values still intact. It is thus recommended to use it
+    in its own separate `domain(args...)` call.* Prefer `impose_bc!(dom::Domain, ...)`
+    instead for safety.
 
     Example for non-penetration condition:
 
@@ -843,7 +881,7 @@ $(nblocks * block_size ^ nd) cells""")
         ginds = bdry.ghost_indices
 
         iargs = map(
-            a -> selectdim(a, 1, part.image_in_domain) |> intp, 
+            a -> selectdim(a, 1, part.deduplication) |> intp, 
             args
         )
         gargs = map(
@@ -865,6 +903,27 @@ $(nblocks * block_size ^ nd) cells""")
                 ga .= η .* ia .+ (1.0f0 .- η) .* ba
             end
         end
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Shortcut for applying BC function on a domain.
+    """
+    impose_bc!(
+        f,
+        dom::Domain, bname::String,
+        args::AbstractArray...;
+        impose_at_ghost::Bool = false,
+        conv_to_backend = identity,
+        conv_from_backend = identity,
+        nthreads::Int = 1,
+        kwargs...
+    ) = dom(
+        args...; conv_to_backend = conv_to_backend, 
+        conv_from_backend = conv_from_backend, nthreads = nthreads
+    ) do part, args...
+        impose_bc!(f, part, bname, args...; kwargs...)
     end
 
     """
