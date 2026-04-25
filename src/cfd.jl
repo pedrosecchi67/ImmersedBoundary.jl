@@ -452,12 +452,12 @@ module CFD
 
     Obtain CUSP scheme inviscid fluxes given primitive variables on the left and right sides
     of a face.
-    If `u` (velocity normal to the face) is not provided,
-    it is taken as the velocity along dimension `dim`.
+
+    `dim` may be a dimension index for Cartesian grids, or a matrix indicating the face normal
+    direction (each row a face).
     """
     function inviscid_fluxes(
-        fluid::Fluid, PL::AbstractMatrix, PR::AbstractMatrix, dim::Int,
-        u::Union{AbstractVector, Nothing} = nothing;
+        fluid::Fluid, PL::AbstractMatrix, PR::AbstractMatrix, dim::Union{AbstractMatrix, Number};
         a0::Real = 0.25f0,
     )
         UcL = primitive2state(fluid, PL)
@@ -471,17 +471,22 @@ module CFD
         P = @. (PL + PR) / 2
         T = @view P[:, 2]
         u = (
-            isnothing(u) ?
-            (@view P[:, 2 + dim]) : u
+            dim isa Number ?
+            (@view P[:, 2 + dim]) : (sum(dim .* P[:, 3:end]; dims = 2) |> vec)
         )
 
         a = speed_of_sound(fluid, T)
         M = @. u / a
 
         F = @. u * (UcL + UcR) / 2 - _cusp_f1(M, a0) * a * (UcR - UcL) / 2
-        Fmom = @view F[:, 2 + dim]
 
-        @. Fmom += ((pR + pL) / 2 - _cusp_f2(M) * (pR - pL) / 2)
+        if dim isa Number
+            Fmom = @view F[:, 2 + dim]
+            @. Fmom += ((pR + pL) / 2 - _cusp_f2(M) * (pR - pL) / 2)
+        else
+            Fmom = @view F[:, 3:end]
+            @. Fmom += ((pR + pL) / 2 - _cusp_f2(M) * (pR - pL) / 2) * dim
+        end
 
         F
     end
@@ -665,3 +670,4 @@ module CFD
     end
 
 end
+
