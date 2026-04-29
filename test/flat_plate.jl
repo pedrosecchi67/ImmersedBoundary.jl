@@ -114,7 +114,7 @@ march! = () -> begin
                     δ(part, R, dim) for dim = 1:2
                 ] |> x -> hcat(x...)
 
-                closure = Wray_Argawal(R, S, ∇R, ∇S)
+                closure = Wray_Agarwal(R, S, ∇R, ∇S)
 
                 uvw = @view P[:, 3:end]
 

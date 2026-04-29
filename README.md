@@ -420,7 +420,7 @@ using ImmersedBoundary.Turbulence
 WallFunction
 shear_rate
 Smagorinsky_νSGS
-Wray_Argawal
+Wray_Agarwal
 
 using ImmersedBoundary.IBL
 
