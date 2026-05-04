@@ -1141,19 +1141,21 @@ $(nblocks * block_size ^ nd) cells""")
     end
 
     """
-    Minmod operator
+    Van-Leer gradient operator
     """
-    minmod(u1::Real, u2::Real) = min(abs(u1), abs(u2)) * (sign(u1) + sign(u2)) / 2
+    van_Leer(u1::Real, u2::Real) = (
+        @. (abs(u1) * u2 + abs(u2) * u1) / (abs(u1) + abs(u2) + 1f-14) 
+    )
 
     """
     $TYPEDSIGNATURES
 
     Obtain values at left and right face of a cell
-    using MUSCL reconstruction, given its neighbors. Uses minmod
+    using MUSCL reconstruction, given its neighbors. Uses van-Leer limiter
     limiter
     """
     function MUSCL(uim1::AbstractArray, ui::AbstractArray, uip1::AbstractArray)
-        grad = @. minmod(ui - uim1, uip1 - ui)
+        grad = @. van_Leer(ui - uim1, uip1 - ui)
 
         (
             ui .- grad ./ 2,
