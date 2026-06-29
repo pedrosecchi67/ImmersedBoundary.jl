@@ -36,6 +36,13 @@ module ArrayBackends
     """
     $TYPEDSIGNATURES
 
+    Convert range to given backend (do nothing)
+    """
+    to_backend(r::AbstractRange, converter) = r
+
+    """
+    $TYPEDSIGNATURES
+
     Convert any other type to backend (do nothing)
     """
     to_backend(a::Any, converter) = a
