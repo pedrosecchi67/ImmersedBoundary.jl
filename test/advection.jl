@@ -65,12 +65,14 @@ begin
         dt = timestep_length() * 0.75f0
 
         dom(u, ud) do part, u, ud
+            D = JST_sensor(part, u)
+
             for dim = 1:ndims(part)
                 Cd = @view C[:, dim]
                 Cf = at_faces(part, Cd, dim)
 
                 ∇u = cell_gradient(part, u, dim)
-                uL, uR = MUSCL(part, u, ∇u, dim)
+                uL, uR = MUSCL(part, u, ∇u, dim; D = D, high_order = true)
 
                 ud .-= green_gauss(
                     part,

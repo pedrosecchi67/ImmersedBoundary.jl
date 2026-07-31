@@ -17,6 +17,11 @@ module ImmersedBoundary
     using .NNInterpolator
     using .NNInterpolator.ArrayAccumulator
 
+    include("cfd.jl")
+    using .CFD
+    include("turbulence.jl")
+    using .Turbulence
+
     include("arraybends.jl")
     using .ArrayBackends
 
@@ -1036,6 +1041,34 @@ module ImmersedBoundary
         tuple(∇uf...)
     end
 
+    export JST_sensor
+    """
+    $TYPEDSIGNATURES
+
+    Evaluate JST-type shock sensor at cells
+    """
+    function CFD.JST_sensor(
+        part::Partition{Ti, Tf},
+        p::AbstractArray, dim::Int = 0
+    ) where {Ti, Tf}
+        if dim == 0
+            ν = similar(p); ν .= 1f-7
+
+            for d = 1:ndims(part)
+                ν .= max.(ν, JST_sensor(part, p, d))
+            end
+
+            return ν
+        end
+
+        face_diff = at_neighbors(part, p, dim) .- at_owners(part, p, dim)
+        ν = (
+            1f-7 .+ abs.(green_gauss(part, face_diff, dim))
+        ) ./ (
+            1f-7 .+ unsigned_green_gauss(part, abs.(face_diff), dim)
+        )
+    end
+
     @inline van_Leer(u1::Real, u2::Real) = (
         u2 * sign(u1) + abs(u2)
     ) / (
@@ -1048,11 +1081,17 @@ module ImmersedBoundary
 
     Obtain MUSCL reconstruction at left and right sides of a face.
     Receives values at cells and (central scheme) gradients at cell centers.
+
+    A Ducros-type shock sensor may be provided in kwarg `D`. If zero, a centered, 
+    second-order scheme is used. If `high_order` is true, a fourth-order 
+    Pade scheme substitutes it. 
+    If one, MUSCL with the van-Leer limiter is used.
     """
     function MUSCL(
         part::Partition{Ti, Tf}, 
         u::AbstractArray, δu::AbstractArray, 
-        dim::Int
+        dim::Int;
+        D::Union{AbstractVector, Nothing} = nothing, high_order::Bool = false,
     ) where {Ti, Tf}
         down = owner_distance(part, dim)
         dneigh = neighbor_distance(part, dim)
@@ -1061,18 +1100,37 @@ module ImmersedBoundary
         uneigh = at_neighbors(part, u, dim)
 
         ∇uf = (uneigh .- uown) ./ (down .+ dneigh)
+        δuo = at_owners(part, δu, dim)
+        δun = at_neighbors(part, δu, dim)
         ∇u = (
-            2 .* at_owners(part, δu, dim) .- ∇uf
+            2 .* δuo .- ∇uf
         ) .* down
         Δu = (
-            2 .* at_neighbors(part, δu, dim) .- ∇uf
+            2 .* δun .- ∇uf
         ) .* dneigh
 
         @. ∇uf = van_Leer(Δu, ∇u) # re-use buffer
 
-        (
+        uL, uR = (
             uown .+ ∇uf, uneigh .- ∇uf
         )
+
+        if !isnothing(D)
+            D = max.(
+                at_owners(part, D, dim), at_neighbors(part, D, dim),
+                1f-7,
+            )
+
+            uf = @. (uown * dneigh + uneigh * down) / (down + dneigh)
+            if high_order
+                @. uf += (δuo - δun) / 8
+            end
+
+            @.  uL = uL * D + (1.0f0 - D) * uf
+            @.  uR = uR * D + (1.0f0 - D) * uf
+        end
+
+        (uL, uR)
     end
 
     export impose_bc!
@@ -1244,10 +1302,5 @@ module ImmersedBoundary
             vtk_save(vtm)
         end
     end
-
-    include("cfd.jl")
-    using .CFD
-    include("turbulence.jl")
-    using .Turbulence
 
 end
