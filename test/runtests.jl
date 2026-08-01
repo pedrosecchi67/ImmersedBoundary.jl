@@ -3,3 +3,4 @@ using ImmersedBoundary.CFD
 using ImmersedBoundary.Turbulence
 
 include("advection.jl")
+include("dissipation.jl")
