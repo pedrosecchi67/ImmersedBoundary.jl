@@ -1,323 +1,324 @@
 module ImmersedBoundary
 
-    using ThreadTools
-    using Base.Threads: ReentrantLock, lock
+    using Base.Threads: @threads, ReentrantLock, lock, nthreads
+    using ThreadTools: tmap
 
     include("mesher.jl")
     using .BlockMesher
-    using .BlockMesher.WriteVTK
+
+    using .BlockMesher.DocStringExtensions
 
     using .BlockMesher.LinearAlgebra
-    using .BlockMesher.DocStringExtensions
+    using .BlockMesher.NearestNeighbors
+
+    using .BlockMesher.WriteVTK
 
     include("nninterp.jl")
     using .NNInterpolator
     using .NNInterpolator.ArrayAccumulator
 
+    include("cfd.jl")
+    using .CFD
+    include("turbulence.jl")
+    using .Turbulence
+
     include("arraybends.jl")
     using .ArrayBackends
 
-    include("point_implicit.jl")
+    @declare_converter NNInterpolator.ArrayAccumulator.Accumulator
 
-    @declare_converter NNInterpolator.Accumulator
-    
     export Stereolitography, refine_to_length, merge_points,
         Box, Ball, Line, DistanceField,
-        feature_regions,
-        export_vtk,
-        Domain, MultigridDomain, impose_bc!,
-        Interpolator, 
-        ∇, Δ, δ, μ, MUSCL, laplacian_smoothing,
-        getalong,
-        advection, dissipation, divergent,
-        surface_integral
+        feature_regions, centers_and_normals,
+        vtk_grid, vtk_save,
+        Mesh, Domain
 
-    """
-    $TYPEDFIELDS
-
-    Struct to define a boundary
-    """
-    struct Boundary{Ti, Tf}
-        ghost_indices::AbstractVector{Ti}
-        ghost_distances::AbstractVector{Tf}
-        image_distances::AbstractVector{Tf}
-        points::AbstractMatrix{Tf}
-        normals::AbstractMatrix{Tf}
-        image_interpolator::NNInterpolator.Accumulator
-    end
-
-    @declare_converter Boundary
-
-    """
-    $TYPEDFIELDS
-
-    Struct to define a mesh partition
-    """
-    struct Partition{Ti, Tf}
-        id::Int
-        margin::Int
-        block_size::Int
-        block_range::AbstractRange
-        interpolator::NNInterpolator.Accumulator
-        domain::AbstractVector{Ti}
-        image::AbstractVector{Ti}
-        image_in_domain::AbstractVector{Ti}
-        deduplication::AbstractVector{Ti}
-        centers::AbstractMatrix{Tf}
-        spacing::AbstractMatrix{Tf}
-        boundaries::Dict{String, Boundary{Ti, Tf}}
-    end
-
-    @declare_converter Partition
+    using ProgressBars
 
     """
     $TYPEDSIGNATURES
 
-    Constructor for a boundary.
+    Get number of elements in mesh
     """
-    function Boundary(
-            ghosts::AbstractVector{Ti}, projs::AbstractMatrix{Tf}, 
-            centers::AbstractMatrix{Tf}, radii::AbstractVector{Tf},
-            ptree::KDTree, centers_deduplicate::AbstractMatrix{Tf}; 
-            ghost_layer_ratio::Real = 1.5f0
-    ) where {Ti, Tf}
-        ϵ = 1f-14 # eps(Tf)
-
-        normals = centers[ghosts, :] .- projs
-        ghost_distances = sum(normals .^ 2; dims = 2) |> vec |> x -> sqrt.(x) .+ ϵ
-        normals ./= ghost_distances
-
-        image_distances = 2 .* radii[ghosts] .* ghost_layer_ratio
-
-        image_interpolator = Interpolator(centers_deduplicate, projs .+ image_distances .* normals, ptree; 
-                                          first_index = true, linear = true)
-        NNInterpolator.ArrayAccumulator.change_data_types!(image_interpolator, Ti, Tf)
-
-        Boundary{Ti, Tf}(
-            ghosts,
-            ghost_distances,
-            image_distances,
-            projs,
-            normals,
-            image_interpolator
-        )
-    end
+    Base.length(msh::Mesh) = msh.block_size ^ size(msh.block_origins, 1) * size(msh.block_origins, 2)
 
     """
     $TYPEDSIGNATURES
 
-    Constructor for a boundary.
+    Find vector of faces between neighbors in an octree.
+    Each face is a tuple with elements:
+
+    ```
+    (
+        dim, # face normal dimension
+        own, # owner, index of cell to left
+        neigh, # neighbor, index of cell to right
+    )
+    ```
     """
-    function Boundary(
-            msh::Mesh, bname::String,
-            part::Partition{Ti, Tf}, ptree::KDTree, centers_deduplicate::AbstractMatrix{Tf}; 
-            ghost_layer_ratio::Real = 1.5f0
-    ) where {Ti, Tf}
-        centers = part.centers
-        radii = sum(part.spacing .^ 2; dims = 2) |> vec |> x -> sqrt.(x) ./ 2
-        
-        nd = size(centers, 2)
+    function octree2faces(
+        origins::AbstractMatrix{Tf}, widths::AbstractMatrix{Tf};
+        verbose::Bool = false,
+    ) where {Tf <: AbstractFloat}
+        Ti = (size(origins, 2) > 1e9 ? Int64 : Int32)
 
-        dfield = msh.distance_fields[bname]
+        verbose && println("Running face detection...")
 
-        should_check = falses(size(centers, 1))
-        should_check[part.image_in_domain] .= true
+        centers = origins .+ widths ./ 2
+        tree = KDTree(centers)
+        radii = sum(widths .^ 2; dims = 1) |> vec |> x -> sqrt.(x) ./ 2
 
-        nperblock = length(should_check) ÷ length(part.block_range)
-
-        ghosts = Ti[]
-        projs = Vector{Tf}[]
-
-        for (k, ib) in part.block_range |> enumerate
-            brange = ((k - 1) * nperblock + 1):(k * nperblock)
-
-            widths = msh.block_widths[:, ib]
-            center = msh.block_origins[:, ib] .+ widths ./ 2
-
-            R = norm(widths) * (part.margin * 2 + 2 * ghost_layer_ratio + part.block_size) / part.block_size / 2
-
-            if dfield(center) > R * 1.2
-                should_check[brange] .= false
-            end
+        faces = Tuple{Ti, Ti, Ti}[]
+        lck = ReentrantLock()
+        iter = 1:size(centers, 2)
+        if verbose
+            iter = ProgressBar(iter)
         end
 
-        for i = 1:length(radii)
-            if should_check[i]
-                x = centers[i, :]
-                r = radii[i] * 2 * ghost_layer_ratio
+        @threads for i = iter
+            mins = origins[:, i] # intersect minima and maxima in cells
+            maxs = mins .+ widths[:, i]
+            neighs = inrange(tree, centers[:, i], radii[i] * 3.1f0)
 
-                p = BlockMesher.projection(dfield, x, r * 2)
-                d = norm(p .- x)
+            my_faces = Tuple{Ti, Ti, Ti}[]
 
-                if d < r
-                    push!(ghosts, Ti(i))
-                    push!(projs, Tf.(p))
+            for j in neighs
+                if i == j
+                    continue
                 end
+
+                nmins = origins[:, j]
+                nmaxs = nmins .+ widths[:, j]
+
+                fo = max.(mins, nmins)
+                fw = min.(maxs, nmaxs) .- fo
+
+                tol = 0.01f0 * maximum(fw)
+                n = 0 # count degenerate dimensions
+                nz = 0
+                for dim = 1:length(fw)
+                    n += (fw[dim] < tol)
+                    nz += fw[dim] < -tol
+                end
+
+                # not a face: not planar
+                if n != 1 || nz > 0
+                    continue
+                end
+
+                ndim = argmin(fw)
+                if origins[ndim, j] < origins[ndim, i] # if left of cell, already registered
+                    continue
+                end
+
+                push!(my_faces, (Ti(ndim), Ti(i), Ti(j)))
             end
-        end
 
-        if length(projs) > 0
-            projs = reduce(hcat, projs) |> permutedims
-        else
-            projs = Matrix{Tf}(undef, 0, nd)
-        end
-
-        Boundary(ghosts, projs, centers, radii, ptree, centers_deduplicate;
-            ghost_layer_ratio = ghost_layer_ratio)
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Constructor for a boundary from hypercube faces.
-    """
-    function Boundary(
-            msh::Mesh, part::Partition{Ti, Tf}, ptree::KDTree, centers_deduplicate::AbstractMatrix{Tf},
-            faces::Tuple{Int, Bool}...; ghost_layer_ratio::Real = 1.5f0
-    ) where {Ti, Tf}
-        origin = msh.origin
-        widths = msh.widths
-
-        centers = part.centers
-        radii = sum(part.spacing .^ 2; dims = 2) |> vec |> x -> sqrt.(x) ./ 2
-
-        should_check = falses(size(centers, 1))
-        should_check[part.image_in_domain] .= true
-
-        ghosts = Ti[]
-        projs = similar(centers)
-
-        for i = 1:length(radii)
-            if should_check[i]
-                x = centers[i, :]
-                d = Inf32
-                p = copy(x)
-
-                for (dim, front) in faces
-                    _p = copy(x)
-                    _p[dim] = (front ? origin[dim] + widths[dim] : origin[dim])
-
-                    _d = norm(_p .- x)
-
-                    if _d < d
-                        d = _d
-                        p .= _p
+            lock(lck) do 
+                for f in my_faces
+                    push!(faces, f)
+                    if length(faces) % 10000 == 0
+                        Base.GC.gc()
                     end
                 end
+            end
+        end
 
-                projs[i, :] .= p
+        faces
+    end
 
-                r = radii[i] * 2 * ghost_layer_ratio
-                if d < r 
-                    push!(ghosts, Ti(i))
+    """
+    $TYPEDSIGNATURES
+
+    In a similar format, find faces in an octree that neighbor
+    hypercube boundaries.
+
+    Returns faces as:
+
+    ```
+    (
+        dim, # face normal dimension
+        own, # owner, index of cell to left
+        neigh, # neighbor, index of cell to right
+    )
+    ```
+    """
+    function hcube_faces(
+        hcube_origins::AbstractVector{Tf}, hcube_widths::AbstractVector{Tf},
+        origins::AbstractMatrix{Tf}, widths::AbstractMatrix{Tf}
+    ) where {Tf <: AbstractFloat}
+        Ti = (size(origins, 2) > 1e9 ? Int64 : Int32)
+
+        faces = Tuple{Ti, Ti, Ti}[]
+        for dim = 1:length(hcube_origins)
+            idxs = findall(
+                abs.(origins[dim, :] .- hcube_origins[dim]) .< widths[dim, :] .* 0.01f0
+            )
+
+            for i in idxs
+                push!(
+                    faces,
+                    (Ti(dim), zero(Ti), Ti(i))
+                )
+            end
+
+            idxs = findall(
+                abs.(
+                    origins[dim, :] .+ widths[dim, :] .- hcube_origins[dim] .- hcube_widths[dim]
+                ) .< widths[dim, :] .* 0.01f0
+            )
+
+            for i in idxs
+                push!(
+                    faces,
+                    (Ti(dim), Ti(i), zero(Ti))
+                )
+            end
+        end
+
+        faces
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Find indices of ghost points and their projections on the surface, 
+    given a distance field and column-major arrays of centers and widths.
+    `ghost_layer_ratio` is a ratio between the ghost cell layer width and
+    the local cell circumdiameter.
+    """
+    function ghosts_and_projections(
+        dfield::DistanceField,
+        centers::AbstractMatrix{Tf}, widths::AbstractMatrix{Tf};
+        ghost_layer_ratio::Real = 1.5f0,
+        verbose::Bool = false,
+    ) where {Tf <: AbstractFloat}
+        Ti = (
+            size(centers, 2) < 1e9 ? Int32 : Int64
+        )
+
+        diams = sum(widths .^ 2; dims = 1) |> vec |> x -> sqrt.(x)
+        verbose && println("Making initial screening...")
+        ghosts = let tree = dfield.tree # first, simple KD-tree query
+            _, dists = nn(tree, centers)
+            dists .<= diams .* ghost_layer_ratio .* 2
+        end |> findall
+        ghosts = Ti.(ghosts)
+
+        projs = similar(centers, (size(centers, 1), length(ghosts)))
+        # go through potential ghost cells, calc. projections
+        iterator = 1:length(ghosts)
+        if verbose
+            iterator = ProgressBar(iterator)
+        end
+
+        @threads for k in iterator
+            g = ghosts[k]
+            projs[:, k] .= BlockMesher.projection(dfield, centers[:, g], 
+                diams[g] * ghost_layer_ratio * 2)
+        end
+
+        mask = let dists = sum((projs .- centers[:, ghosts]) .^ 2; dims = 1) |> vec |> x -> sqrt.(x)
+            dists .<= diams[ghosts] .* ghost_layer_ratio
+        end
+
+        (ghosts[mask], projs[:, mask])
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Find indices of ghost points and their projections on the surface, 
+    given a distance field and a mesh.
+    `ghost_layer_ratio` is a ratio between the ghost cell layer width and
+    the local cell circumdiameter.
+    """
+    ghosts_and_projections(
+        dfield::DistanceField, msh::Mesh;
+        ghost_layer_ratio::Real = 1.5f0,
+        verbose::Bool = false,
+    ) = let (centers, widths, _) = (
+        BlockMesher.get_cells(msh)
+    )
+        ghosts_and_projections(dfield, centers, widths; 
+            ghost_layer_ratio = ghost_layer_ratio, verbose = verbose)
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain indices of ghost points and their projections on the surface, 
+    given a vector of hypercube faces (tuples between dimension and
+    front/back boolean)
+    """
+    function ghosts_and_projections(
+        faces::AbstractVector{Tuple{Tib, Bool}},
+        hcube_origin::AbstractVector, hcube_widths::AbstractVector,
+        centers::AbstractMatrix{Tf}, widths::AbstractMatrix{Tf};
+        ghost_layer_ratio::Real = 1.5f0, verbose::Bool = false,
+    ) where {Tib <: Integer, Tf <: AbstractFloat}
+        Ti = (
+            size(centers, 2) < 1e9 ? Int32 : Int64
+        )
+
+        diams = sum(widths .^ 2; dims = 1) |> vec |> x -> sqrt.(x)
+        verbose && println("Detecting hypercube boundary intersection...")
+        verbose && begin
+            for (dim, front) in faces
+                println("Dimension $dim, $(front ? "front" : "back")")
+            end
+        end
+
+        mask = falses(length(diams))
+        projs = similar(centers)
+        dists = similar(centers, (length(diams),))
+        dists .= Inf32
+        for (dim, front) in faces
+            ps = copy(centers)
+            ps[dim, :] .= (
+                front ? hcube_origin[dim] + hcube_widths[dim] : hcube_origin[dim]
+            )
+            ds = sum(
+                (ps .- centers) .^ 2; dims = 1
+            ) |> vec |> x -> sqrt.(x)
+
+            for (k, d) in enumerate(ds)
+                if d < dists[k]
+                    dists[k] = d
+                    projs[:, k] .= ps[:, k]
+                end
+
+                if d < diams[k] * ghost_layer_ratio
+                    mask[k] = true
                 end
             end
         end
 
-        projs = projs[ghosts, :]
+        ghosts = Ti.(findall(mask))
+        projs = projs[:, ghosts]
 
-        Boundary(ghosts, projs, centers, radii, ptree, centers_deduplicate;
-            ghost_layer_ratio = ghost_layer_ratio)
+        (ghosts, projs)
     end
 
     """
     $TYPEDSIGNATURES
 
-    Obtain array of indices deduplicating a point cloud as per tolerance.
-    Prioritizes points in array `priority`
+    Obtain indices of ghost points and their projections on the surface, 
+    given a vector of hypercube faces (tuples between dimension and
+    front/back boolean)
     """
-    function deduplicate(X::AbstractMatrix, tolerance::Real, 
-        priority::AbstractVector{Ti}) where Ti
-        pt2tag = x -> Int64.(round.(x ./ tolerance))
-        Ttag = pt2tag(X[1, :]) |> typeof
-
-        d = Dict{Ttag, Ti}()
-        addpt! = i -> let tag = pt2tag(X[i, :])
-            if haskey(d, tag)
-                return
-            end
-            d[tag] = Ti(i);
-        end
-
-        map(addpt!, priority)
-        for i = 1:size(X, 1)
-            addpt!(i)
-        end
-
-        values(d) |> collect |> sort
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Build partition from mesh
-    """
-    function Partition(
-        msh::Mesh, block_range::AbstractRange, margin::Int,
-        X::AbstractMatrix, tree::KDTree;
-        id::Int = 0, ghost_layer_ratio::Real = 1.5f0,
-        tolerance::Real = 1f-7,
-        hypercube_families = [],
+    ghosts_and_projections(
+        faces::AbstractVector{Tuple{Ti, Bool}},
+        msh::Mesh;
+        ghost_layer_ratio::Real = 1.5f0, verbose::Bool = false,
+    ) where {Ti <: Integer} = let (centers, widths, _) = (
+        BlockMesher.get_cells(msh)
     )
-        centers, widths, is_margin = BlockMesher.get_cells(
-            msh, block_range; margin = margin
+        ghosts_and_projections(
+            faces,
+            msh.origin, msh.widths, centers, widths;
+            ghost_layer_ratio = ghost_layer_ratio, verbose = verbose
         )
-        centers = permutedims(centers)
-        widths = permutedims(widths)
-
-        nd = size(centers, 2)
-        nblocks = length(block_range)
-        ncells = size(centers, 1)
-        ncells_total = size(msh.block_origins, 2) * (ncells ÷ nblocks)
-        nperblock = msh.block_size ^ nd
-
-        Tf = eltype(centers)
-        Ti = (ncells_total > 1e9 ? Int64 : Int32)
-
-        interp = Interpolator(X, centers, tree;
-            first_index = true, linear = true)
-
-        in_domain = @. !is_margin
-
-        image_in_domain = findall(in_domain) |> x -> Ti.(x)
-        image = map(
-            block -> ((block - 1) * nperblock + 1):(block * nperblock),
-            block_range
-        ) |> x -> reduce(vcat, x) |> x -> Ti.(x)
-
-        domain, hmap = NNInterpolator.domain(interp)
-        NNInterpolator.re_index!(interp, hmap)
-        NNInterpolator.ArrayAccumulator.change_data_types!(interp, Ti, Tf)
-
-        deduplication = deduplicate(centers, tolerance, image_in_domain)
-
-        part = Partition{Ti, Tf}(
-            id, margin, msh.block_size, block_range,
-            interp,
-            domain, image, image_in_domain, deduplication,
-            centers, widths,
-            Dict{String, Boundary{Ti, Tf}}()
-        )
-
-        let centers_deduplicate = centers[part.deduplication, :]
-            ptree = KDTree(centers_deduplicate')
-
-            for bname in msh.distance_fields |> keys
-                part.boundaries[bname] = Boundary(
-                    msh, bname, part, ptree, centers_deduplicate;
-                    ghost_layer_ratio = ghost_layer_ratio
-                )
-            end
-
-            for (bname, faces) in hypercube_families
-                part.boundaries[bname] = Boundary(
-                    msh, part, ptree, centers_deduplicate, faces...;
-                    ghost_layer_ratio = ghost_layer_ratio
-                )
-            end
-        end
-
-        part
     end
 
     """
@@ -336,403 +337,23 @@ module ImmersedBoundary
         stl::Stereolitography
     end
 
-    @declare_converter Surface{Int32, Float32}
-    @declare_converter Surface{Int64, Float32}
-    @declare_converter Surface{Int32, Float64}
-    @declare_converter Surface{Int64, Float64}
-
+    export surface_integral
     """
-    $TYPEDFIELDS
+    $TYPEDSIGNATURES
 
-    Struct to define a domain
+    integrate a property throughout a surface
     """
-    struct Domain{Ti, Tf}
-        mesh::Mesh
-        tree::KDTree
-        partitions::Dict{Int, Partition{Ti, Tf}}
-        surfaces::Dict{String, Surface{Ti, Tf}}
-    end
-
-    @declare_converter BlockMesher.Mesh
-    @declare_converter Domain
-
-    _index_range(
-        N::Int, nmax::Int
-    ) = let nparts = max(1, N ÷ nmax)
-        psize = N ÷ nparts
-
-        idxs = AbstractRange[]
-        for i0 = 1:nparts
-            push!(idxs, i0:nparts:N)
-        end
-
-        idxs
-    end
+    surface_integral(surf::Surface, u::AbstractVector) = (surf.areas .* u |> sum)
 
     """
     $TYPEDSIGNATURES
 
-    Construct a domain from a mesh.
-
-    Defines partitions as per maximum partition size in cells (def. 100_000).
-    Defines block margins at width `margin` cells (def. 2).
-
-    `ghost_layer_ratio` (def. 1.5) defines a ratio between the width of the ghost
-    cell layer and the local cell circumdiameter.
-
-    Hypercube boundary families may be specified as:
-
-    ```
-    hypercube_families = [
-        "inlet" => [
-            (1, false), # x axis, front
-            (2, false), # y axis, left
-            (2, true), # y axis, right
-            (3, false), # z axis, bottom
-            (3, true) # z axis, top
-        ],
-        "outlet" => [(1, true)]
-    ]
-    ```
+    integrate a property throughout a surface. The first dimension in the array
+    is assumed to refer to point/cell indices
     """
-    function Domain(
-        msh::Mesh;
-        margin::Int = 2,
-        max_partition_size::Int = 100_000,
-        ghost_layer_ratio::Real = 1.5f0,
-        tolerance::Real = 1f-7,
-        hypercube_families = [],
-        verbose::Bool = false,
+    surface_integral(surf::Surface, u::AbstractArray) = (
+        surf.areas .* u |> a -> sum(a; dims = 1) |> a -> dropdims(a; dims = 1)
     )
-        nd = size(msh.block_origins, 1)
-        nblocks = size(msh.block_origins, 2)
-        nperblock = (msh.block_size + margin * 2) ^ nd
-        nblocks_perpart = max(max_partition_size ÷ nperblock, 1)
-
-        ranges = _index_range(nblocks, nblocks_perpart)
-
-        X = BlockMesher.get_cells(msh)[1]
-        tree = KDTree(X)
-        X = permutedims(X)
-
-        n = 0
-        lck = ReentrantLock()
-        parts = Dict(
-            tmap(
-                id -> let r = ranges[id]
-                    part = Partition(
-                        msh, r, margin, X, tree; id = id, 
-                        ghost_layer_ratio = ghost_layer_ratio,
-                        hypercube_families = hypercube_families,
-                        tolerance = tolerance,
-                    )
-                    
-                    verbose && lock(lck) do
-                        n += 1
-                        println("Built partition $n/$(length(ranges))")
-                    end
-
-                    id => part
-                end, 1:length(ranges)
-            )...
-        )
-
-        Ti = parts |> values |> first |> x -> eltype(x.domain)
-        Tf = parts |> values |> first |> x -> eltype(x.centers)
-        surfaces = Dict{String, Surface{Ti, Tf}}()
-
-        Domain(
-            msh, tree, parts, surfaces
-        )
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain interpolator to a given set of points in a domain
-    (matrix, size `(npts, ndims)`).
-
-    Kwargs can specify if linear interpolation is used (def. `linear = true`)
-    and the number of points for interpolation (def. `k = 2 ^ N`).
-    """
-    function NNInterpolator.Interpolator(
-        dom::Domain{Ti, Tf}, Xc::AbstractMatrix{Tf2};
-        linear::Bool = true, k::Int = 0, 
-        _X::Union{AbstractMatrix{Tf}, Nothing} = nothing
-    ) where {Ti, Tf, Tf2}
-        tree = dom.tree
-        if isnothing(_X)
-            _X = zeros(Tf, length(dom), ndims(dom))
-
-            dom(_X) do part, _X
-                _X .= part.centers
-            end
-        end
-
-        NNInterpolator.Interpolator(
-            _X, Xc, tree; linear = linear, k = k,
-            first_index = true
-        )
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain interpolator from one domain to another.
-
-    Kwargs can specify if linear interpolation is used (def. `linear = true`)
-    and the number of points for interpolation (def. `k = 2 ^ N`).
-    """
-    function NNInterpolator.Interpolator(
-        src::Domain{Ti, Tf}, dst::Domain{Ti2, Tf2};
-        linear::Bool = true, k::Int = 0,
-    ) where {Ti, Tf, Ti2, Tf2}
-        Xc = zeros(Tf2, length(dst), ndims(dst))
-
-        dst(Xc) do part, Xc
-            Xc .= part.centers
-        end
-
-        NNInterpolator.Interpolator(
-            src, Xc; linear = linear, k = k,
-        )
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Build domains and coarseners/prolongators for multigrid.
-    Takes the same arguments as `Domain()`.
-    Example:
-
-    ```
-    domain, coarse_domains, coarseners, prolongators = MultigridDomain(
-        3, # 3 mgrid levels
-        origins, widths, surfaces; kwargs...
-    )
-    ```
-
-    `coarseners[i]` and `prolongators[i]` are callable objects that interpolate any
-    field property from level `i-1` to level `i`.
-    """
-    function MultigridDomain(
-        n_levels::Int,
-        origin::AbstractVector, widths::AbstractVector,
-        surfaces...;
-        factor::Int = 2,
-        refinement_regions::AbstractVector = [],
-        verbose::Bool = false, kwargs...
-    )
-        domains = Domain[]
-        coarseners = NNInterpolator.ArrayAccumulator.Accumulator[]
-        prolongators = NNInterpolator.ArrayAccumulator.Accumulator[]
-
-        gen_new = (refinement_regions, surfaces) -> begin
-            verbose && println("Building multigrid level $(length(domains))...")
-
-            dom = Domain(origin, widths, surfaces...; 
-                refinement_regions = refinement_regions, 
-                verbose = verbose, kwargs...)
-
-            if length(domains) > 0
-                push!(
-                    coarseners,
-                    Interpolator(domains[end], dom)
-                )
-                push!(
-                    prolongators,
-                    Interpolator(dom, domains[end])
-                )
-            end
-
-            push!(domains, dom)
-
-            (
-                [(sdf => h * factor) for (sdf, h) in refinement_regions],
-                [(sname, stl, h * factor) for (sname, stl, h) in surfaces]
-            )
-        end
-
-        for _ = 1:(n_levels + 1)
-            refinement_regions, surfaces = gen_new(refinement_regions, surfaces)
-        end
-
-        (
-            domains[1], domains[2:end], coarseners, prolongators
-        )
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Add surfaces to a domain.
-    """
-    function add_surfaces!(
-        dom::Domain{Ti, Tf},
-        surfaces::Pair{String, Stereolitography}...;
-        ghost_layer_ratio::Real = 1.5f0
-    ) where {Ti, Tf}
-        ϵ = 1f-14 # eps(Tf)
-        tree = dom.tree
-        
-        h = zeros(Tf, length(dom))
-        X = zeros(Tf, length(dom), ndims(dom))
-        dom(h, X) do part, h, X
-            h .= sum(part.spacing .^ 2; dims = 2) |> vec |> x -> sqrt.(x) .* ghost_layer_ratio
-            X .= part.centers
-        end
-
-        for (sname, stl) in surfaces
-            centers, normals = centers_and_normals(stl)
-
-            centers = permutedims(centers)
-            normals = permutedims(normals)
-
-            areas = sum(normals .^ 2; dims = 2) |> vec |> x -> sqrt.(x) .+ ϵ
-            normals ./= areas
-
-            hs = let (idxs, _) = NNInterpolator.NearestNeighbors.nn(tree, centers')
-                h[idxs]
-            end
-
-            points = centers .+ normals .* hs
-            interp = Interpolator(dom, points;
-                _X = X, k = ndims(dom) + 1)
-
-            NNInterpolator.ArrayAccumulator.change_data_types!(interp, Ti, Tf)
-
-            dom.surfaces[sname] = Surface{Ti, Tf}(
-                points, hs, normals, areas, interp, deepcopy(stl)
-            )
-
-            delete!(dom.mesh.distance_fields, sname)
-        end
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Generate a domain given hypercube origins and widths.
-
-    Surfaces should be specified as tuples with family names,
-    `Stereolitography` structs and local refinement levels, respectively.
-
-    Refinement regions, meanwhile, may be specified as tuples between distance
-    functions (see `Line, Box, Ball, DistanceField` in this module) and local refinement levels.
-
-    An approximate growth rate is accepted for the block octree/quadtree.
-    The block size (along all axes) is given by `block_size` (def. 8).
-
-    Example:
-
-    ```
-    stl = Stereolitography("wall.dat") # or STL in 3D
-    stl2 = Stereolitography("wall2.dat")
-
-    features = feature_regions(stl) |> DistanceField
-    region2 = Stereolitography("region.stl") |> DistanceField
-
-    msh = Domain(
-        [-1.0, -1.0], [3.0, 3.0], # origin, widths
-        ("wall", stl, 1e-3),
-        ("wall2", stl2, 2e-3);
-        growth_ratio = 2.0f0, # default
-        refinement_regions = [
-            features => 5e-4,
-            region2 => 1e-2,
-            Ball([0.0, 0.0], 1.0) => 2e-2,
-            Box([-1.0, -1.0], [1.0, 2.0]) => 1e-2
-        ],
-    )
-    ```
-
-    Defines partitions as per maximum partition size in cells (def. 1_000_000).
-    Defines block margins at width `margin` cells (def. 2).
-
-    `ghost_layer_ratio` (def. 1.5) defines a ratio between the width of the ghost
-    cell layer and the local cell circumdiameter.
-
-    Hypercube boundary families may be specified as:
-
-    ```
-    hypercube_families = [
-        "inlet" => [
-            (1, false), # x axis, front
-            (2, false), # y axis, left
-            (2, true), # y axis, right
-            (3, false), # z axis, bottom
-            (3, true) # z axis, top
-        ],
-        "outlet" => [(1, true)]
-    ]
-    ```
-    """
-    function Domain(
-        origin::AbstractVector, widths::AbstractVector,
-        surfaces...;
-        growth_ratio::Real = 2.0f0,
-        tolerance::Real = 1f-7,
-        block_size::Int = 8,
-        refinement_regions::AbstractVector = [],
-        margin::Int = 2,
-        max_partition_size::Int = 100_000,
-        ghost_layer_ratio::Real = 1.5f0,
-        hypercube_families = [],
-        verbose::Bool = false,
-    )
-        verbose && println("======DOMAIN GEN. PROCEDURE======")
-
-        stls = Dict(
-            [
-                sname => stl for (sname, stl, _) in surfaces
-            ]...
-        )
-
-        t0 = time()
-        verbose && println("Generating region tree mesh...")
-
-        dom = let msh = Mesh(
-            origin, widths, surfaces...;
-            growth_ratio = growth_ratio,
-            tolerance = tolerance, block_size = block_size,
-            refinement_regions = refinement_regions,
-            verbose = verbose
-        )
-            verbose && println("[DONE] - $(time() - t0) seconds elapsed")
-
-            nd, nblocks = size(msh.block_origins)
-            verbose && println("""
-$(nblocks) blocks
-$(nblocks * block_size ^ nd) cells""")
-
-            t0 = time()
-            verbose && println("Partitioning and detecting boundary points...")
-
-            dom = Domain(
-                msh;
-                max_partition_size = max_partition_size, margin = margin,
-                ghost_layer_ratio = ghost_layer_ratio, 
-                hypercube_families = hypercube_families,
-                tolerance = tolerance,
-                verbose = verbose
-            )
-
-            verbose && println("[DONE] - $(time() - t0) seconds elapsed")
-
-            dom
-        end
-
-        t0 = time()
-        verbose && println("Adding surfaces and removing distance field references...")
-
-        add_surfaces!(dom, stls...; ghost_layer_ratio = ghost_layer_ratio)
-
-        verbose && println("[DONE] - $(time() - t0) seconds elapsed")
-
-        verbose && println("=================================")
-
-        dom
-    end
 
     """
     $TYPEDSIGNATURES
@@ -742,206 +363,866 @@ $(nblocks * block_size ^ nd) cells""")
     (surf::Surface)(u::AbstractArray) = surf.interpolator(u)
 
     """
+    $TYPEDFIELDS
+
+    Struct to define a domain partition
+    """
+    struct Partition{Ti <: Integer, Tf <: AbstractFloat}
+        id::Int
+        centers::AbstractMatrix{Tf}
+        spacing::AbstractMatrix{Tf}
+        face_accumulators::Dict{Tuple{Int64, Bool}, Accumulator}
+        face_owners_neighbors::Dict{Int64, Tuple{AbstractVector{Ti}, AbstractVector{Ti}}}
+        domain::AbstractVector{Ti}
+        image::AbstractVector{Ti}
+        image_in_domain::AbstractVector{Ti}
+    end
+
+    """
     $TYPEDSIGNATURES
 
-    Run function on all partitions of a domain.
-
-    Example:
-
-    ```
-    domain(A, B) do part, A, B # here, A, B indicate arrays
-        # selected to partition part, with padding for finite difference ops.
-
-        # now we do whatever we want with them! We can edit them in-place, too
-
-        r # return values are gathered in an array and returned.
-    end
-    ```
-
-    In these arrays, the first index is always expected to correspond to the cell 
-    index.
-
-    Kwargs are passed as they are to the evaluation function.
-
-    Conversion functions `conv_to_backend` and `conv_from_backend` may be passed to
-    convert arrays (and partitions) to a custom array backend before any operations.
-
-    Example:
-
-    ```
-    # for CuArrays:
-    using CUDA
-
-    conv_to_backend = x -> cu(x)
-    conv_from_backend = x -> Array(x)
-    ```
-
-    `nthreads` may be specified to allow for multi-threading between partitions.
+    Obtain dimensionality of a domain partition
     """
-    function (dom::Domain)(
-        f,
-        args::AbstractArray...; 
-        conv_to_backend = identity,
-        conv_from_backend = identity,
-        nthreads::Int = 1,
-        kwargs...
-    )
-        fp = part -> begin
-            pargs = map(
-                a -> selectdim(a, 1, part.domain) |> copy |> x -> to_backend(
-                    x, conv_to_backend
-                ), args
+    Base.ndims(part::Partition) = size(part.centers, 2)
+
+    """
+    $TYPEDSIGNATURES
+
+    Struct to define a boundary
+    """
+    struct Boundary{Ti <: Integer, Tf <: AbstractFloat}
+        ghost_indices::AbstractVector{Ti}
+        projections::AbstractMatrix{Tf}
+        normals::AbstractMatrix{Tf}
+        image_distances::AbstractVector{Tf}
+        ghost_distances::AbstractVector{Tf}
+        image_interpolator::Accumulator
+        image_domain::AbstractVector{Ti}
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Constructor for a boundary from ghost point indices and their
+    projections on the boundary
+    """
+    function Boundary(
+        centers::AbstractMatrix{Tf}, widths::AbstractMatrix{Tf}, 
+        tree::KDTree,
+        ghost_indices::AbstractVector{Ti}, projs::AbstractMatrix{Tf};
+        ghost_ratio::Real = 1.5f0,
+    ) where {Ti <: Integer, Tf <: AbstractFloat}
+        ghosts = @view centers[ghost_indices, :]
+        normals = ghosts .- projs
+        ghost_distances = sum(normals .^ 2; dims = 2) |> vec |> x -> sqrt.(x)
+        normals ./= (ghost_distances .+ eps(Tf))
+        
+        image_distances = sum(widths[ghost_indices, :] .^ 2; dims = 2) |> vec |> x -> sqrt.(x) .* ghost_ratio .+ eps(Tf)
+        images = projs .+ normals .* image_distances
+
+        image_interpolator = Interpolator(
+            centers, images, tree; first_index = true, linear = true,
+        )
+
+        dom, hmap = NNInterpolator.domain(image_interpolator)
+        dom = Ti.(dom)
+        NNInterpolator.re_index!(image_interpolator, hmap)
+
+        Boundary{Ti, Tf}(
+            ghost_indices, projs, normals,
+            image_distances, ghost_distances, image_interpolator, dom
+        )
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Construct a partitioned boundary with a max. number of ghost points per
+    partition.
+    """
+    function boundary_partitions(
+        centers::AbstractMatrix{Tf}, widths::AbstractMatrix{Tf}, 
+        tree::KDTree,
+        ghost_indices::AbstractVector{Ti}, projs::AbstractMatrix{Tf},
+        max_partition_size::Int = 100_000;
+        ghost_ratio::Real = 1.5f0,
+    ) where {Ti <: Integer, Tf <: AbstractFloat}
+        bd = Dict{Int64, Boundary{Ti, Tf}}()
+
+        for (ipart, indices) in enumerate(
+            Base.Iterators.partition(1:length(ghost_indices), max_partition_size)
+        )
+            bd[ipart] = Boundary(
+                centers, widths, tree,
+                ghost_indices[indices], projs[indices, :];
+                ghost_ratio = ghost_ratio
             )
+        end
 
-            image = part.image
-            part = to_backend(part, conv_to_backend)
+        bd
+    end
 
-            pargs = part.interpolator.(pargs)
-            r = f(part, pargs...; kwargs...)
+    """
+    $TYPEDFIELDS
 
-            for (a, pa) in zip(args, pargs)
-                pa = selectdim(pa, 1, part.image_in_domain) |> copy
-                
-                selectdim(a, 1, image) .= to_backend(
-                    pa, conv_from_backend
+    Struct to define a domain
+    """
+    struct Domain{Ti <: Integer, Tf <: AbstractFloat}
+        ncells::Int
+        mesh::Mesh
+        partitions::Dict{Int64, Partition{Ti, Tf}}
+        boundaries::Dict{String, Dict{Int64, Boundary{Ti, Tf}}}
+        surfaces::Dict{String, Surface{Ti, Tf}}
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain dimensionality of a domain
+    """
+    Base.ndims(dom::Domain) = ndims(
+        dom.partitions[1]
+    )
+
+    _averaging_weights(
+        stencils::AbstractVector
+    ) = map(
+        s -> fill(1.0f0 / length(s), length(s)),
+        stencils
+    )
+
+    """
+    $TYPEDSIGNATURES
+
+    Construct a domain from a mesh.
+
+    Defines partitions as per maximum partition size in cells (def. 100_000).
+
+    `ghost_layer_ratio` (def. 1.5) defines a ratio between the width of the ghost
+    cell layer and the local cell circumdiameter.
+
+    Hypercube boundary families may be specified as:
+
+    ```
+    hypercube_families = [
+        "inlet" => [
+            (1, false), # x axis, front
+            (2, false), # y axis, left
+            (2, true), # y axis, right
+            (3, false), # z axis, bottom
+            (3, true) # z axis, top
+        ],
+        "outlet" => [(1, true)]
+    ]
+    ```
+
+    Domain partitions assume maximum cell numbers of `max_partition_size`
+    and skirts of `partition_skirt_depth` cells.
+    """
+    function Domain(
+        msh::Mesh;
+        max_partition_size::Int = 100_000,
+        partition_skirt_depth::Int = 2,
+        ghost_layer_ratio::Real = 1.5f0,
+        hypercube_families = [],
+        verbose::Bool = false,
+    )
+        verbose && println("==Initiating domain definition procedure...==")
+
+        nd = size(msh.block_origins, 1)
+        nblocks = size(msh.block_origins, 2)
+        block_size = msh.block_size
+
+        ncells = block_size ^ nd * nblocks
+
+        verbose && println("Working with $ncells cells")
+
+        centers, widths, _ = get_cells(msh)
+        origins = centers .- widths ./ 2
+
+        verbose && println("Defining faces...")
+        t0 = time()
+
+        faces = [
+            octree2faces(origins, widths; verbose = verbose);
+            hcube_faces(msh.origin, msh.widths,
+                origins, widths)
+        ]
+        nfaces = length(faces)
+
+        Base.GC.gc()
+
+        Ti = (
+            max(nfaces, ncells) > 1e9 ?
+            Int64 : Int32
+        )
+        Tf = Float32
+
+        cells2faces = [
+            Ti[] for _ = 1:ncells
+        ]
+        for (ifc, (_, o, n)) in enumerate(faces)
+            if o != 0
+                push!(cells2faces[o], Ti(ifc))
+            end
+            if n != 0
+                push!(cells2faces[n], Ti(ifc))
+            end
+        end
+
+        Base.GC.gc()
+
+        verbose && println("[DONE] - $(time() - t0) seconds elapsed")
+        verbose && println("$nfaces faces constructed")
+
+        partitions = Dict{Int64, Partition{Ti, Tf}}()
+
+        let partiter = Base.Iterators.partition(1:ncells, max_partition_size) |> collect
+            nparts = length(partiter)
+            verbose && println("Building $(nparts) partitions...")
+            t0 = time()
+
+            lck = ReentrantLock()
+
+            idxiter = 1:nparts
+            if verbose
+                idxiter = ProgressBar(idxiter)
+            end
+            @threads for ipart = idxiter
+                part = partiter[ipart]
+                image = Ti.(collect(part))
+
+                domain = Set{Ti}(image)
+                for _ = 1:partition_skirt_depth
+                    for c in collect(domain)
+                        for f in cells2faces[c]
+                            _, o, n = faces[f]
+
+                            o != 0 && push!(domain, o) # owner
+                            n != 0 && push!(domain, n) # neighbor
+                        end
+                    end
+                end
+                domain = collect(domain)
+                sort!(domain)
+
+                face_accumulators = Dict{Tuple{Int64, Bool}, Accumulator}()
+                face_owners_neighbors = Dict{Int64, Tuple{AbstractVector{Ti}, AbstractVector{Ti}}}()
+                let idx2domain = Dict(
+                    d => Ti(k) for (k, d) in enumerate(domain)
+                )
+                    face_indices = reduce(union, cells2faces[domain]) |> unique
+
+                    for dim = 1:size(centers, 1)
+                        owners = Ti[]
+                        neighbors = Ti[]
+                        right_faces = [
+                            Ti[] for _ = 1:length(domain)
+                        ]
+                        left_faces = [
+                            Ti[] for _ = 1:length(domain)
+                        ]
+
+                        k = zero(Ti)
+                        for f in face_indices
+                            ndim, o, n = faces[f]
+
+                            if ndim != dim
+                                continue
+                            end
+
+                            o = (haskey(idx2domain, o) ? idx2domain[o] : zero(Ti))
+                            n = (haskey(idx2domain, n) ? idx2domain[n] : zero(Ti))
+
+                            add_left = true
+                            add_right = true
+                            if o == 0
+                                o = n
+                                add_right = false
+                            end
+                            if n == 0
+                                n = o
+                                add_left = false
+                            end
+
+                            push!(owners, o)
+                            push!(neighbors, n)
+
+                            k += 1
+                            add_left && push!(left_faces[n], k)
+                            add_right && push!(right_faces[o], k)
+
+                            if k % 10000 == 0
+                                Base.GC.gc()
+                            end
+                        end
+
+                        face_owners_neighbors[dim] = (owners, neighbors)
+                        face_accumulators[(dim, false)] = Accumulator(
+                            left_faces,
+                            _averaging_weights(left_faces);
+                            first_index = true,
+                        )
+                        face_accumulators[(dim, true)] = Accumulator(
+                            right_faces,
+                            _averaging_weights(right_faces);
+                            first_index = true,
+                        )
+                    end
+
+                    image_in_domain = map(
+                        i -> idx2domain[i], image
+                    )
+
+                    lock(lck) do
+                        partitions[ipart] = Partition{Ti, Tf}(
+                            ipart,
+                            centers[:, domain] |> permutedims,
+                            widths[:, domain] |> permutedims,
+                            face_accumulators, face_owners_neighbors,
+                            domain, image, image_in_domain,
+                        )
+
+                        Base.GC.gc()
+                    end
+                end
+            end
+
+            verbose && println("[DONE] - $(time() - t0) seconds elapsed")
+        end
+
+        verbose && println("Defining boundaries and surfaces...")
+        t0 = time()
+
+        boundaries = Dict{String, Dict{Int64, Boundary{Ti, Tf}}}()
+        surfaces = Dict{String, Surface{Ti, Tf}}()
+        let tree = KDTree(centers)
+            diams = sum(widths .^ 2; dims = 1) |> vec |> x -> sqrt.(x)
+
+            for (bname, faces) in hypercube_families
+                println("Defining boundary $bname...")
+
+                ghosts, projs = ghosts_and_projections(faces, msh;
+                    ghost_layer_ratio = ghost_layer_ratio, verbose = verbose)
+                projs = permutedims(projs)
+
+                boundaries[bname] = boundary_partitions(
+                    centers', widths', tree,
+                    ghosts, projs, max_partition_size; ghost_ratio = ghost_layer_ratio
                 )
             end
 
-            r
+            for (bname, dfield) in msh.distance_fields
+                println("Defining boundary $bname...")
+
+                begin
+                    ghosts, projs = ghosts_and_projections(dfield, msh;
+                        ghost_layer_ratio = ghost_layer_ratio, verbose = verbose)
+                    projs = permutedims(projs)
+
+                    boundaries[bname] = boundary_partitions(
+                        centers', widths', tree,
+                        ghosts, projs, max_partition_size; ghost_ratio = ghost_layer_ratio
+                    )
+                end
+
+                begin
+                    stl = dfield.stl
+                    fcenters, fnormals = centers_and_normals(stl)
+                    idx, _ = nn(tree, fcenters)
+
+                    h = diams[idx] .* ghost_layer_ratio # face offset defined by nearest
+                    # cell
+                    A = sum(fnormals' .^ 2; dims = 2) |> vec |> x -> sqrt.(x) .+ eps(Tf)
+                    fnormals = fnormals' ./ A
+                    fcenters = permutedims(fcenters)
+
+                    surfaces[bname] = Surface{Ti, Tf}(
+                        fcenters, h,
+                        fnormals, A,
+                        Interpolator(centers', fcenters .+ fnormals .* h,
+                            tree; first_index = true),
+                        stl
+                    )
+                end
+            end
         end
 
-        tmap(
-            fp, nthreads, values(dom.partitions)
+        verbose && println("[DONE] - $(time() - t0) seconds elapsed")
+
+        verbose && println("==Done with domain definition!==")
+
+        Domain{Ti, Tf}(
+            ncells,
+            msh,
+            partitions,
+            boundaries,
+            surfaces,
+        )
+    end
+
+    @declare_converter Partition
+    @declare_converter Boundary
+    @declare_converter Domain
+
+    """
+    $TYPEDSIGNATURES
+
+    Run function through partitions.
+
+    Example:
+
+    ```
+    domain(R, U) do part, r, u
+        # do stuff on the partition, on arrays r and u
+        # (you can change them in place)
+
+        # selection of values belonging to the current partition
+        # is done by indexing cells on the first dimension of the arrays
+
+        # any return values are collected and returned by the 
+        # global func. call
+        k
+    end
+    ```
+
+    Kwargs `conv_to_backend` and `conv_from_backend` should convert
+    input arrays to and from custom backends (e.g. `x -> CuArray(x)`)
+    for use with GPUs and the like.
+
+    Other kwargs are passed to each function call.
+    `nthreads` is set to the number of available threads by default.
+    """
+    function (dom::Domain{Ti, Tfd})(
+        f,
+        args::AbstractArray{Tf}...;
+        conv_to_backend = nothing,
+        conv_from_backend = nothing,
+        n_threads::Int = 0,
+        kwargs...
+    ) where {Ti, Tfd, Tf}
+        if n_threads == 0
+            n_threads = nthreads()
+        end
+
+        @assert isnothing(conv_to_backend) == isnothing(conv_from_backend) "Backend converters must be provided at the same time"
+
+        tmap(n_threads, keys(dom.partitions) |> collect) do i 
+            let part = dom.partitions[i]
+                dargs = map(
+                    a -> selectdim(
+                        a,
+                        1, part.domain
+                    ) |> copy, args
+                )
+                if !isnothing(conv_to_backend)
+                    dargs = conv_to_backend.(dargs)
+                    part = to_backend(part, conv_to_backend)
+                end
+
+                r = f(part, dargs...; kwargs...)
+
+                if !isnothing(conv_from_backend)
+                    dargs = conv_from_backend.(dargs)
+                end
+
+                for (a, da) in zip(args, dargs)
+                    selectdim(a, 1, part.image) .= selectdim(da, 1, part.image_in_domain)
+                end
+
+                r
+            end
+        end
+    end
+
+    """
+    $TYPEDSIGNATURES
+
+    Get number of elements in a domain
+    """
+    Base.length(dom::Domain) = length(dom.mesh)
+
+    export at_owners
+    """
+    $TYPEDSIGNATURES
+
+    Obtain view to properties at face owners
+    """
+    at_owners(part::Partition{Ti, Tf}, u::AbstractArray, dim::Int) where {Ti, Tf} = selectdim(
+        u, 1, part.face_owners_neighbors[dim][1]
+    )
+
+    export at_neighbors
+    """
+    $TYPEDSIGNATURES
+
+    Obtain view to properties at face neighbors
+    """
+    at_neighbors(part::Partition{Ti, Tf}, u::AbstractArray, dim::Int) where {Ti, Tf} = selectdim(
+        u, 1, part.face_owners_neighbors[dim][2]
+    ) |> copy
+
+    export at_faces
+    """
+    $TYPEDSIGNATURES
+
+    Obtain properties at faces
+    """
+    function at_faces(
+        part::Partition{Ti, Tf}, u::AbstractArray, dim::Int
+    ) where {Ti, Tf}
+        spown = at_owners(part, part.spacing, dim)
+        spneigh = at_neighbors(part, part.spacing, dim)
+        uown = at_owners(part, u, dim)
+        uneigh = at_neighbors(part, u, dim)
+
+        (uown .* spneigh[:, dim] .+ uneigh .* spown[:, dim]) ./ (
+            spneigh[:, dim] .+ spown[:, dim]
+        )
+    end
+
+    export green_gauss
+    """
+    $TYPEDSIGNATURES
+
+    Obtain Green-Gauss integral over face properties
+    """
+    function green_gauss(
+        part::Partition{Ti, Tf},
+        uf::AbstractArray, dim::Int
+    ) where {Ti, Tf}
+        accl = part.face_accumulators[(dim, false)]
+        accr = part.face_accumulators[(dim, true)]
+
+        (accr(uf) .- accl(uf)) ./ part.spacing[:, dim]
+    end
+
+    export unsigned_green_gauss
+    """
+    $TYPEDSIGNATURES
+
+    Obtain unsigned Green-Gauss integral over face properties
+    """
+    function unsigned_green_gauss(
+        part::Partition{Ti, Tf},
+        uf::AbstractArray, dim::Int
+    ) where {Ti, Tf}
+        accl = part.face_accumulators[(dim, false)]
+        accr = part.face_accumulators[(dim, true)]
+
+        (accr(uf) .+ accl(uf)) ./ part.spacing[:, dim]
+    end
+
+    export divergent
+    """
+    $TYPEDSIGNATURES
+
+    Obtain Green-Gauss divergent over face properties
+    """
+    divergent(
+        part::Partition{Ti, Tf},
+        uf::Tuple
+    ) where {Ti, Tf} = sum(
+        dim -> green_gauss(part, uf[dim], dim),
+        1:ndims(part)
+    )
+
+    export cell_gradient
+    """
+    $TYPEDSIGNATURES
+
+    Obtain Green-Gauss gradient of a property at cell centers
+    along dimension `dim`
+    """
+    function cell_gradient(
+        part::Partition{Ti, Tf},
+        u::AbstractArray, dim::Int
+    ) where {Ti, Tf}
+        green_gauss(
+            part, at_faces(part, u, dim), dim
         )
     end
 
     """
     $TYPEDSIGNATURES
 
-    Impose boundary condition on domain array.
-    *NOTE: this function is only guaranteed to work on arrays with 
-    their fringe values still intact. It is thus recommended to use it
-    in its own separate `domain(args...)` call.* Prefer `impose_bc!(dom::Domain, ...)`
-    instead for safety.
+    Obtain Green-Gauss gradient of a property at cell centers.
+    Returns tuple with gradients along each dimension
+    """
+    cell_gradient(
+        part::Partition{Ti, Tf},
+        u::AbstractArray
+    ) where {Ti, Tf} = tuple(
+        [
+            cell_gradient(part, u, dim) for dim = 1:ndims(part)
+        ]...
+    )
 
-    Example for non-penetration condition:
+    export face_distance
+    """
+    $TYPEDSIGNATURES
 
-    ```
-    dom(u, v) do part, udom, vdom
-        # function receives values of field properties at image points
-        # and returns their values at the boundary
-        ibm.impose_bc!(part, "wall", udom, vdom) do bdry, uimage, vimage
-            nx, ny = bdry.normals |> eachcol
-            un = @. nx * uimage + ny * vimage
+    Obtain distances between owners and neighbors at faces
+    """
+    function face_distance(
+        part::Partition{Ti, Tf}, dim::Int
+    ) where {Ti, Tf}
+        spown = at_owners(part, part.spacing, dim)
+        spneigh = at_neighbors(part, part.spacing, dim)
 
-            (
-                uimage .- un .* nx,
-                vimage .- un .* ny
+        (spown[:, dim] .+ spneigh[:, dim]) ./ 2
+    end
+
+    export owner_distance
+    """
+    $TYPEDSIGNATURES
+
+    Obtain distance between face and owner cell center
+    """
+    function owner_distance(
+        part::Partition{Ti, Tf}, dim::Int
+    ) where {Ti, Tf}
+        spown = at_owners(part, part.spacing, dim)
+
+        spown[:, dim] ./ 2
+    end
+
+    export neighbor_distance
+    """
+    $TYPEDSIGNATURES
+
+    Obtain distance between face and neighbor cell center
+    """
+    function neighbor_distance(
+        part::Partition{Ti, Tf}, dim::Int
+    ) where {Ti, Tf}
+        spneigh = at_neighbors(part, part.spacing, dim)
+
+        spneigh[:, dim] ./ 2
+    end
+
+    export face_gradient
+    """
+    $TYPEDSIGNATURES
+
+    Obtain gradient of a property normal to a set of faces
+    given values at cells
+    """
+    face_gradient(
+        part::Partition{Ti, Tf}, u::AbstractArray, dim::Int
+    ) where {Ti, Tf} = (
+        at_neighbors(part, u, dim) .- at_owners(part, u, dim)
+    ) ./ face_distance(part, dim)
+
+    """
+    $TYPEDSIGNATURES
+
+    Obtain gradient of a property at faces
+    given values and gradients at cells
+    """
+    function face_gradient(
+        part::Partition{Ti, Tf}, 
+        u::AbstractArray, ∇u::Tuple, dim::Int
+    ) where {Ti, Tf}
+        ∇uf = []
+        for i = 1:ndims(part)
+            if i == dim
+                push!(
+                    ∇uf, face_gradient(part, u, dim)
+                )
+            else
+                push!(
+                    ∇uf, at_faces(part, ∇u[i], dim)
+                )
+            end
+        end
+
+        tuple(∇uf...)
+    end
+
+    export JST_sensor
+    """
+    $TYPEDSIGNATURES
+
+    Evaluate JST-type shock sensor at cells
+    """
+    function CFD.JST_sensor(
+        part::Partition{Ti, Tf},
+        p::AbstractArray, dim::Int = 0
+    ) where {Ti, Tf}
+        if dim == 0
+            ν = similar(p); ν .= 1f-7
+
+            for d = 1:ndims(part)
+                ν .= max.(ν, JST_sensor(part, p, d))
+            end
+
+            return ν
+        end
+
+        face_diff = at_neighbors(part, p, dim) .- at_owners(part, p, dim)
+        ν = (
+            1f-7 .+ abs.(green_gauss(part, face_diff, dim))
+        ) ./ (
+            1f-7 .+ unsigned_green_gauss(part, abs.(face_diff), dim)
+        )
+    end
+
+    @inline van_Leer(u1::Real, u2::Real) = (
+        u2 * sign(u1) + abs(u2)
+    ) / (
+        abs(u1) + abs(u2) + 1f-7
+    ) * u1
+
+    export MUSCL
+    """
+    $TYPEDSIGNATURES
+
+    Obtain MUSCL reconstruction at left and right sides of a face.
+    Receives values at cells and (central scheme) gradients at cell centers.
+
+    A Ducros-type shock sensor may be provided in kwarg `D`. If zero, a centered, 
+    second-order scheme is used. If `high_order` is true, a fourth-order 
+    Pade scheme substitutes it. 
+    If one, MUSCL with the van-Leer limiter is used.
+    """
+    function MUSCL(
+        part::Partition{Ti, Tf}, 
+        u::AbstractArray, δu::AbstractArray, 
+        dim::Int;
+        D::Union{AbstractVector, Nothing} = nothing, high_order::Bool = false,
+    ) where {Ti, Tf}
+        down = owner_distance(part, dim)
+        dneigh = neighbor_distance(part, dim)
+
+        uown = at_owners(part, u, dim)
+        uneigh = at_neighbors(part, u, dim)
+
+        ∇uf = (uneigh .- uown) ./ (down .+ dneigh)
+        δuo = at_owners(part, δu, dim)
+        δun = at_neighbors(part, δu, dim)
+        ∇u = (
+            2 .* δuo .- ∇uf
+        ) .* down
+        Δu = (
+            2 .* δun .- ∇uf
+        ) .* dneigh
+
+        @. ∇uf = van_Leer(Δu, ∇u) # re-use buffer
+
+        uL, uR = (
+            uown .+ ∇uf, uneigh .- ∇uf
+        )
+
+        if !isnothing(D)
+            D = max.(
+                at_owners(part, D, dim), at_neighbors(part, D, dim),
+                1f-7,
             )
+
+            uf = @. (uown * dneigh + uneigh * down) / (down + dneigh)
+            if high_order
+                @. uf += (δuo * down - δun * dneigh) / 8
+            end
+
+            @.  uL = uL * D + (1.0f0 - D) * uf
+            @.  uR = uR * D + (1.0f0 - D) * uf
         end
+
+        (uL, uR)
     end
 
-    # alternative return value:
-    uv = zeros(length(dom), 2)
-    uv[:, 1] .= 1.0
-    dom(uv) do part, uvdom
-        ibm.impose_bc!(part, "wall", uvdom) do bdry, uvim
-            uimage, vimage = eachcol(uvim)
-            nx, ny = eachcol(bdry.normals)
-            un = @. nx * uimage + ny * vimage
+    export impose_bc!
+    """
+    $TYPEDSIGNATURES
 
-            uvim .- un .* bdry.normals
-        end
+    Impose boundary conditions on arrays of field properties (cell identified
+    by first index).
+
+    Example for non-penetration condition in 2D:
+
+    ```
+    impose_bc!(dom, "wall", u, v) do bdry, u, v # values at image points
+        nx, ny = bdry.normals |> eachcol
+        # other assets:
+        # * projections (matrix)
+        # * image_distances (vector)
+
+        un = @. nx * u + ny * v
+        
+        (
+            u .- nx .* un,
+            v .- ny .* un
+        )
+    end
+
+    # alternative with single return value:
+    impose_bc!(dom, "wall", uv) do bdry, uv
+        n = bdry.normals
+        un = sum(uv .* n; dims = 2) |> vec
+
+        uv .- un .* n
     end
     ```
 
-    Kwargs are passed directly to the BC function.
-    Note that other field variable args. may be passed
-    as auxiliary variables (e. g. the BC function may receive
-    3 arrays as an input, and return BCs solely for the first two).
-
-    We may directly return ghost cell values rather than boundary values
-    by activating flag `impose_at_ghost`.
+    Runs in `n_threads` threads, or all available.
+    Kwargs `conv_to_backend` and `conv_from_backend`
+    are similar to those seen in `Domain`.
+    Other kwargs are passed to the BC function
     """
     function impose_bc!(
         f,
-        part::Partition, bname::String,
-        args::AbstractArray...;
-        impose_at_ghost::Bool = false,
+        dom::Domain{Ti, Tf}, bname::String,
+        args::AbstractArray...; 
+        n_threads::Int = 0,
+        conv_to_backend = nothing,
+        conv_from_backend = nothing,
         kwargs...
-    )
-        bdry = part.boundaries[bname]
+    ) where {Ti, Tf}
+        parts = dom.boundaries[bname]
 
-        if length(bdry.ghost_indices) == 0
-            return
+        if n_threads == 0
+            n_threads = nthreads()
         end
 
-        intp = bdry.image_interpolator
-        η = bdry.ghost_distances ./ bdry.image_distances
-        ginds = bdry.ghost_indices
+        @assert isnothing(conv_to_backend) == isnothing(conv_from_backend) "Backend converters must be provided at the same time"
 
-        iargs = map(
-            a -> selectdim(a, 1, part.deduplication) |> intp, 
-            args
-        )
-        gargs = map(
-            a -> selectdim(a, 1, ginds), args
-        )
+        tmap(
+            n_threads, keys(parts) |> collect
+        ) do ipart
+            bdry = parts[ipart]
 
-        bargs = f(bdry, iargs...; kwargs...)
+            ginds = bdry.ghost_indices
+            η = bdry.ghost_distances ./ bdry.image_distances
 
-        if !(bargs isa Tuple)
-            bargs = (bargs,)
-        end
+            _args = args
+            if !isnothing(conv_to_backend)
+                bdry = to_backend(bdry, conv_to_backend)
+                _args = to_backend(args, conv_to_backend)
+            end
 
-        for (ia, ga, ba) in zip(
-            iargs, gargs, bargs
-        )
-            if impose_at_ghost
-                ga .= ba
-            else
+            iargs = map(_args) do a
+                selectdim(a, 1, bdry.image_domain) |> bdry.image_interpolator
+            end
+
+            r = f(bdry, iargs...; kwargs...)
+            if !(r isa Tuple)
+                r = (r,)
+            end
+
+            if !isnothing(conv_from_backend)
+                r = to_backend(r, conv_from_backend)
+                iargs = to_backend(iargs, conv_from_backend)
+            end
+
+            for (a, ba, ia) in zip(args, r, iargs)
+                ga = selectdim(a, 1, ginds)
                 ga .= η .* ia .+ (1.0f0 .- η) .* ba
             end
         end
     end
 
-    """
-    $TYPEDSIGNATURES
-
-    Shortcut for applying BC function on a domain.
-    """
-    impose_bc!(
-        f,
-        dom::Domain, bname::String,
-        args::AbstractArray...;
-        impose_at_ghost::Bool = false,
-        conv_to_backend = identity,
-        conv_from_backend = identity,
-        nthreads::Int = 1,
-        kwargs...
-    ) = dom(
-        args...; conv_to_backend = conv_to_backend, 
-        conv_from_backend = conv_from_backend, nthreads = nthreads
-    ) do part, args...
-        impose_bc!(f, part, bname, args...; kwargs...)
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Get number of cells in domain
-    """
-    Base.length(dom::Domain) = let nd = size(dom.mesh.block_origins, 1)
-        size(dom.mesh.block_origins, 2) * dom.mesh.block_size ^ nd
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Get number of dimensions of domain
-    """
-    Base.ndims(dom::Domain) = size(dom.mesh.block_origins, 1)
-
+    export export_vtk
     """
     $TYPEDSIGNATURES
 
@@ -1020,345 +1301,5 @@ $(nblocks * block_size ^ nd) cells""")
             vtk_save(vtm)
         end
     end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain value of field property array at position `i, j[, k]` 
-    along block stencil. At block edges, periodic BCs are used within margins.
-    An error is thrown if `i, j[, k]` exceeds margins.
-
-    Example:
-
-    ```
-    u = rand(length(domain))
-    ux = similar(u)
-
-    domain(u, ux) do part, u, ux # values at local domain
-        dx, dy = part.spacing |> eachcol
-
-        ux .= ( # note that we're editing in-place
-            part(u, 1, 0) .- part(u, -1, 0)
-        ) ./ (2 .* dx)
-    end
-
-    # ux is now the first, x-axis derivative of u
-    ```
-    """
-    function (part::Partition)(
-        u::AbstractArray, ijk::Int...
-    )
-        if any(
-            i -> abs(i) > part.margin, ijk
-        )
-            error("Attempting to access point $(ijk) beyond block margins (check argument `margin` in domain creation)")
-        end
-
-        nd = size(part.centers, 2)
-
-        ublock = reshape(
-            u, fill(part.block_size + 2 * part.margin, nd)..., :, 
-            size(u)[2:end]...
-        )
-
-        @assert nd == length(ijk) "Number of dimensions specified in partition Cartesian grid call $(ijk) is incompatible with dimensionality"
-        n_extra_dims = ndims(ublock) - length(ijk) - 1
-
-        shift_dims = ((@. - ijk)..., 0, fill(0, n_extra_dims)...)
-
-        circshift(ublock, shift_dims) |> x -> reshape(x, size(u)...)
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain stencil index `i` along dimension `dim` in a partition array.
-    `part(u, 0, 3, 0)` is equivalent to `ibm.getalong(part, u, 2, 3)`, for example
-    """
-    getalong(part::Partition, U::AbstractArray, dim::Int, i::Int) = let inds = zeros(
-        Int64, size(part.centers, 2)
-    )
-        inds[dim] = i
-        part(U, inds...)
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain a backward derivative along dimension `dim`.
-    """
-    ∇(part::Partition, u::AbstractArray, dim::Int64) = let uim1 = getalong(part, u, dim, -1)
-        (u .- uim1) ./ part.spacing[:, dim]
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain a forward derivative along dimension `dim`.
-    """
-    Δ(part::Partition, u::AbstractArray, dim::Int64) = let uip1 = getalong(part, u, dim, 1)
-        (uip1 .- u) ./ part.spacing[:, dim]
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain a central derivative along dimension `dim`.
-    """
-    δ(part::Partition, u::AbstractArray, dim::Int64) = let uip1 = getalong(part, u, dim, 1)
-        (uip1 .- getalong(part, u, dim, -1)) ./ (
-            2 .* part.spacing[:, dim]
-        )
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain the average of a property at face `i + 1/2` along dimension `dim`.
-    """
-    μ(part::Partition, u::AbstractArray, dim::Int64) = (
-        getalong(part, u, dim, 1) .+ u
-    ) ./ 2
-
-    """
-    $TYPEDSIGNATURES
-
-    Run iteration of laplacian smoothing (obtain average of neighbors)
-    """
-    function laplacian_smoothing(part::Partition, u::AbstractArray)
-        uavg = similar(u)
-        uavg .= 0
-
-        cnt = 0
-        for i = 1:size(part.spacing, 2)
-            cnt += 2
-            uavg .+= (
-                getalong(part, u, i, -1) .+ getalong(part, u, i, 1)
-            )
-        end
-
-        uavg ./ cnt
-    end
-
-    """
-    Minmod operator
-    """
-    minmod(u1::Real, u2::Real) = min(abs(u1), abs(u2)) * (sign(u1) + sign(u2)) / 2
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain values at left and right face of a cell
-    using MUSCL reconstruction, given its neighbors. Uses minmod
-    limiter
-    """
-    function MUSCL(uim1::AbstractArray, ui::AbstractArray, uip1::AbstractArray)
-        grad = @. minmod(ui - uim1, uip1 - ui)
-
-        (
-            ui .- grad ./ 2,
-            ui .+ grad ./ 2,
-        )
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Auxiliary function for `-∇⋅(uϕ)`.
-    Uses upwinding (`order = 1`) or linear-upwinding with MUSCL (`order = 2`).
-    """
-    function advection(
-        part::Partition, u::AbstractMatrix, ϕ::AbstractArray;
-        order::Int = 2,
-    )
-        mdiv = similar(ϕ)
-        mdiv .= 0.0
-
-        for dim = 1:size(u, 2)
-            v = @view u[:, dim]
-            h = @view part.spacing[:, dim]
-
-            vim12 = (getalong(part, v, dim, -1) .+ v) ./ 2
-            vip12 = (getalong(part, v, dim, 1) .+ v) ./ 2
-
-            ϕLim12 = ϕRim12 = ϕLip12 = ϕRip12 = nothing
-            if order == 1
-                ϕLim12 = getalong(part, ϕ, dim, -1)
-                ϕRim12 = ϕ
-                ϕLip12 = ϕ
-                ϕRip12 = getalong(part, ϕ, dim, 1)
-            elseif order == 2
-                ϕim2 = getalong(part, ϕ, dim, -2)
-                ϕim1 = getalong(part, ϕ, dim, -1)
-                ϕip1 = getalong(part, ϕ, dim, 1)
-                ϕip2 = getalong(part, ϕ, dim, 2)
-
-                _, ϕLim12 = MUSCL(ϕim2, ϕim1, ϕ)
-                ϕRim12, ϕLip12 = MUSCL(ϕim1, ϕ, ϕip1)
-                ϕRip12, _ = MUSCL(ϕ, ϕip1, ϕip2)
-            else
-                throw(error("Order $order unsupported for advection-dissipation"))
-            end
-            
-            @. mdiv -= (
-                (
-                    vip12 * (ϕLip12 + ϕRip12) - abs(vip12) * (ϕRip12 - ϕLip12)
-                ) - (
-                    vim12 * (ϕLim12 + ϕRim12) - abs(vim12) * (ϕRim12 - ϕLim12)
-                )
-            ) / 2 / h
-        end
-
-        mdiv
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Auxiliary function for `-∇⋅u`.
-    Uses upwinding (`order = 1`) or linear-upwinding with MUSCL (`order = 2`).
-    """
-    function divergent(
-        part::Partition, u::AbstractMatrix;
-        order::Int = 2,
-    )
-        mdiv = similar(u, (size(u, 1),))
-        mdiv .= 0
-
-        for dim = 1:size(u, 2)
-            v = @view u[:, dim]
-            h = @view part.spacing[:, dim]
-
-            vLim12 = vRim12 = vLip12 = vRip12 = nothing
-            if order == 1
-                vLim12 = getalong(part, v, dim, -1)
-                vRim12 = v
-                vLip12 = v
-                vRip12 = getalong(part, v, dim, 1)
-            elseif order == 2
-                vim2 = getalong(part, v, dim, -2)
-                vim1 = getalong(part, v, dim, -1)
-                vip1 = getalong(part, v, dim, 1)
-                vip2 = getalong(part, v, dim, 2)
-
-                _, vLim12 = MUSCL(vim2, vim1, v)
-                vRim12, vLip12 = MUSCL(vim1, v, vip1)
-                vRip12, _ = MUSCL(v, vip1, vip2)
-            else
-                throw(error("Order $order unsupported for divergent"))
-            end
-
-            up_ip12 = @. (vLip12 + vRip12) / 2 >= 0.0
-            up_im12 = @. (vLim12 + vRim12) / 2 >= 0.0
-
-            # Godunov: no flow if in opposite directions
-            has_flow_ip12 = @. !((vLip12 < 0.0) && (vRip12 > 0.0))
-            has_flow_im12 = @. !((vLim12 < 0.0) && (vRim12 > 0.0))
-            
-            @. mdiv += (
-                (
-                    up_ip12 * vLip12 + (1 - up_ip12) * vRip12
-                ) * has_flow_ip12 - (
-                    up_im12 * vLim12 + (1 - up_im12) * vRim12
-                ) * has_flow_im12
-            ) / h
-        end
-
-        mdiv
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Auxiliary function for `∇⋅(μ ∇ϕ)`.
-    """
-    function dissipation(
-        part::Partition, μ::Union{Real, AbstractVector}, ϕ::AbstractArray
-    )
-        div = similar(ϕ)
-        div .= 0
-
-        for dim = 1:size(part.spacing, 2)
-            h = @view part.spacing[:, dim]
-
-            μim1 = μip1 = μ
-            if μ isa AbstractArray
-                μim1 = getalong(part, μ, dim, -1)
-                μip1 = getalong(part, μ, dim, 1)
-            end
-
-            ϕim1 = getalong(part, ϕ, dim, -1)
-            ϕip1 = getalong(part, ϕ, dim, 1)
-
-            @. div += (
-                (μip1 + μ) * (ϕip1 - ϕ) -
-                (μim1 + μ) * (ϕ - ϕim1) 
-            ) / h ^ 2 / 2
-        end
-
-        div
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    integrate a property throughout a surface
-    """
-    surface_integral(surf::Surface, u::AbstractVector) = (surf.areas .* u |> sum)
-
-    """
-    $TYPEDSIGNATURES
-
-    integrate a property throughout a surface. The first dimension in the array
-    is assumed to refer to point/cell indices
-    """
-    surface_integral(surf::Surface, u::AbstractArray) = (
-        surf.areas .* u |> a -> sum(a; dims = 1) |> a -> dropdims(a; dims = 1)
-    )
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain multigrid data structures from domain.
-    """
-    function PointImplicit.GeometricMultigrid.Multigrid(
-        dom::Domain{Ti, Tf}, n_levels::Int
-    ) where {Ti, Tf}
-        X = zeros(Tf, length(dom), ndims(dom))
-        V = zeros(Tf, length(dom))
-
-        dom(X, V) do part, X, V
-            V .= prod(part.spacing; dims = 2) |> vec
-            X .= part.centers
-        end
-
-        mgrid = PointImplicit.GeometricMultigrid.Multigrid(
-            X, n_levels, V
-        )
-
-        for (c, p) in zip(mgrid.coarseners, mgrid.prolongators)
-            PointImplicit.GeometricMultigrid.ArrayAccumulator.change_data_types!(
-                c, Ti, Tf
-            )
-            PointImplicit.GeometricMultigrid.ArrayAccumulator.change_data_types!(
-                p, Ti, Tf
-            )
-        end
-
-        mgrid
-    end
-
-    include("cfd.jl")
-    using .CFD
-
-    @declare_converter CFD.FlowBC
-
-    include("turbulence.jl")
-    using .Turbulence
-
-    @declare_converter Turbulence.WallFunction
-
-    include("ibl.jl")
-    using .IBL
 
 end

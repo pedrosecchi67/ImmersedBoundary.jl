@@ -1,119 +1,96 @@
 begin
+    @info "Running advection test case"
 
-@info "Running linear advection test case"
+    lower = Stereolitography(
+        [0.0 1.0; 0.0 0.0]
+    )
+    upper = Stereolitography(
+        [0.0 0.0; 0.0 1.0]
+    )
 
-lower = Stereolitography(
-    [
-        1.0 0.0;
-        0.0 0.0
-    ]; closed = false
-)
-upper = Stereolitography(
-    [
-        0.0 0.0;
-        0.0 1.0
-    ]; closed = false
-)
+    msh = Mesh(
+        [0.0, 0.0], [1.0, 1.0],
+        ("lower", lower, 1f-2),
+        ("upper", upper, 1f-2);
+        refinement_regions = [
+            Line([0.0, 0.0], [1.0, 1.0]) => 2f-2,
+            Line([0.0, 0.0], [0.5, 0.5]) => 1f-2,
+        ],
+        verbose = true,
+    )
 
-dom, coarse_doms, coarseners, prolongators = MultigridDomain(
-    4,
-    [0.0, 0.0],
-    [1.0, 1.0],
-    ("lower", lower, 1e-2),
-    ("upper", upper, 1e-2);
-    refinement_regions = [
-        (Line([0.0, 0.0], [1.0, 1.0]), 1e-2),
-    ],
-    verbose = true,
-)
+    dom = Domain(msh; verbose = true,
+        hypercube_families = [
+            "outlet" => [(1, true), (2, true)],
+        ],
+    )
 
-u = zeros(length(dom))
+    u = zeros(Float32, length(dom))
 
-Cx = 1.0
-Cy = 1.0
-
-# timescale for BC imposition
-timescale = dom -> dom() do part
-    minimum(
-        part.spacing ./ [Cx Cy]
-    ) / 2
-end |> minimum
-
-udot = (dom, u, dt) -> let unew = copy(u)
-    dom(u, unew) do part, u, unew
-        unew .+= - (
-            ∇(part, u, 1) .* Cx .+
-            ∇(part, u, 2) .* Cy
-        ) .* dt
-
-        impose_bc!(part, "upper", unew) do bdry, unew
+    apply_bcs! = u -> begin
+        impose_bc!(
+            dom, "upper", u
+        ) do bdry, u
             1.0f0
         end
-
-        impose_bc!(part, "lower", unew) do bdry, unew
+        impose_bc!(
+            dom, "lower", u
+        ) do bdry, u
             0.0f0
+        end
+        impose_bc!(
+            dom, "outlet", u
+        ) do bdry, u
+            copy(u)
         end
     end
 
-    (unew .- u) ./ dt
-end
+    Cx = ones(Float32, length(dom))
+    Cy = ones(Float32, length(dom))
+    C = [Cx Cy]
 
-mgrid_correction = (
-    dom, u;
-    source = 0.0f0,
-    coarse_doms = [],
-    coarseners = [],
-    prolongators = [],
-    CFL::Real = 0.5,
-    n_iter::Int = 10,
-) -> let uold = copy(u)
-    τ = timescale(dom) * CFL
+    timestep_length = () -> dom() do part
+        0.5f0 / maximum(
+            max.(
+                unsigned_green_gauss(part, at_faces(part, Cx, 1), 1),
+                unsigned_green_gauss(part, at_faces(part, Cy, 2), 2),
+            )
+        )
+    end |> minimum
 
-    if length(coarse_doms) > 0
-        cdom = coarse_doms[1]
-        coars = coarseners[1]
-        prolong = prolongators[1]
+    march! = u -> begin
+        ud = similar(u)
+        ud .= 0
 
-        r = udot(dom, u, τ) .+ source
+        dt = timestep_length() * 0.75f0
 
-        uc = coars(u)
-        rc = coars(r)
+        dom(u, ud) do part, u, ud
+            D = JST_sensor(part, u)
 
-        τc = timescale(cdom) * CFL
-        P = rc .- udot(cdom, uc, τc)
+            for dim = 1:ndims(part)
+                Cd = @view C[:, dim]
+                Cf = at_faces(part, Cd, dim)
 
-        u .+= mgrid_correction(cdom, uc;
-            source = P,
-            coarse_doms = coarse_doms[2:end],
-            prolongators = prolongators[2:end],
-            coarseners = coarseners[2:end],
-            CFL = CFL, n_iter = n_iter
-        ) |> prolong
+                ∇u = cell_gradient(part, u, dim)
+                uL, uR = MUSCL(part, u, ∇u, dim; D = D, high_order = true)
+
+                ud .-= green_gauss(
+                    part,
+                    (@. (uL + uR) * Cf / 2 + abs(Cf) * (uL - uR) / 2),
+                    dim
+                )
+            end
+        end
+
+        u .+= ud .* dt
+        apply_bcs!(u)
+
+        u
     end
 
-    for _ = 1:n_iter
-        u .+= (
-            source .+ udot(dom, u, τ)
-        ) .* τ
+    for _ = 1:1000
+        march!(u)
     end
-    s = u .- uold
-    u .= uold
 
-    s
-end
-
-for _ = 1:5
-    u .+= mgrid_correction(dom, u;
-        coarseners = coarseners,
-        prolongators = prolongators,
-        coarse_doms = coarse_doms, 
-        n_iter = 25)
-end
-
-export_vtk(
-    "advection", dom;
-    export_surface = false,    
-    u = u,
-)
-
+    export_vtk("advection", dom; u = u)
 end

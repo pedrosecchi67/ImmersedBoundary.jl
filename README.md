@@ -67,19 +67,15 @@ stl = merge_points(stl1, stl2; tolerance = 1e-5)
 # Mesh generation
 
 ```julia
-function Domain(
-    origin::AbstractVector, widths::AbstractVector,
-    surfaces...;
-    growth_ratio::Real = 2.0f0,
-    tolerance::Real = 1f-7,
-    block_size::Int = 8,
-    refinement_regions::AbstractVector = [],
-    margin::Int = 2,
-    max_partition_size::Int = 1_000_000,
-    ghost_layer_ratio::Real = 1.5f0,
-    hypercube_families = [],
-    verbose::Bool = false,
-)
+    function Mesh(
+        origin::AbstractVector, widths::AbstractVector,
+        surfaces::Tuple...;
+        growth_ratio::Real = 2.0f0,
+        tolerance::Real = 1f-7,
+        block_size::Int = 8,
+        refinement_regions::AbstractVector = [],
+        verbose::Bool = false,
+    )
 ```
 
 Generate an octree/quadtree mesh described by:
@@ -99,28 +95,6 @@ Generate an octree/quadtree mesh described by:
         Mesher.Line([1.0, 0.0], [2.0, 0.0]) => 0.005
     ]
     ```
-* A "cell growth ratio" for the octree/quadtree blocks, following Nakahashi's building-cubes method; and
-* A ghost layer ratio, which defines the thickness of the ghost cell layer
-    within a solid as a ratio of the local cell circumdiameter.
-
-Hypercube boundary family names may be specified by:
-
-```julia
-hypercube_families = [
-    "inlet" => [
-        (1, false), # back face, x axis
-        (2, true), # front face, y axis
-        (3, false), # bottom face, z axis
-        (3, true) # top face, z axis
-    ],
-    "symmetry" => [
-        (2, false) # left face, y axis
-    ],
-    "outlet" => [
-        (1, true) # front face, x axis
-    ]
-]
-```
 
 Example:
 
@@ -129,22 +103,43 @@ stl = Stereolitography("rae2822.dat")
 features = feature_regions(stl; radius = 0.05)
 feature_dfield = DistanceField(features)
 
-dom = Domain(
-    [-40.0, -40.0],
-    [80.0, 80.0],
+msh = Mesh(
+    [-40.0, -40.0], # hypercube origin
+    [80.0, 80.0], # hypercube widths
     ("wall", stl, 4e-3);
     refinement_regions = [
         (feature_dfield, 0.5e-3),
     ],
-    hypercube_families = [
-        "freestream" => [(1, false), (1, true), (2, false), (2, true)],
-    ],
-    max_partition_size = 2000,
     verbose = true
 )
 
-@show ndims(dom) # dimensionality
+@show length(msh) # number of cells
+```
+
+# Creating domain
+
+You can turn a mesh into a domain with all the information necessary for residual computation with:
+
+```julia
+dom = Domain(
+    msh;
+    max_partition_size = 100_000, # max. number of cells per partition
+    partition_skirt_depth = 2, # partition "skirt" depth. Should be 2 for second order ops.
+    ghost_layer_ratio = 1.5f0, # ratio between cell circumdiameter and max. ghost layer boundary distance
+    hypercube_families = [
+        "inlet" => [
+            (1, false), # dimension, front/back
+            (2, false), (2, true),
+            (3, false), (3, true)
+        ],
+        "outlet" => [
+            (1, true)
+        ]
+    ],
+)
+
 @show length(dom) # number of cells
+@show ndims(dom) # number of dom. dimensions
 ```
 
 # Calculating residuals
@@ -155,7 +150,7 @@ function (dom::Domain)(
     args::AbstractArray...; 
     conv_to_backend = identity,
     conv_from_backend = identity,
-    nthreads::Int = 1,
+    n_threads::Int = 0, # default: as many as available
     kwargs...
 )
 ```
@@ -192,60 +187,74 @@ conv_to_backend = x -> cu(x)
 conv_from_backend = x -> Array(x)
 ```
 
-`nthreads` may be specified to allow for multi-threading between partitions.
-
 # Grid operators
 
 ```julia
 u = rand(length(domain))
 ux = similar(u)
 
-domain(u, ux) do part, u, ux # values at local domain
+domain(r, u) do part, r, u # values at local domain
     dx, dy = part.spacing |> eachcol
     # we have the very similar part.centers too ;)
 
-    ux .= ( # note that we're editing in-place
-        part(u, 1, 0) .- part(u, -1, 0)
-    ) ./ (2 .* dx)
+    # cell Green-Gauss gradient
+    ux = cell_gradient(part, u, 1)
+
+    # similar, but returns tuple with each dimension
+    ∇u = cell_gradient(part, u)
+
+
+    # example for linear advection-dissipation
+    C = [1.0f0, 1.0f0]
+    a = 1f-3
+
+    r .= 0
+    D = JST_sensor(part, D)
+    for dim = 1:ndims(part)
+        uL, uR = MUSCL(
+            part, u, ∇u[dim], # cell value, grad. at cell center
+            dim; 
+            D = D, # optional shock sensor
+            high_order = true # if true, switches to fourth order reconstruction
+            # at smooth regions
+        )
+
+        # advection
+        r .-= green_gauss(
+            part, uL .* C[dim], # upwind
+            dim
+        )
+
+        # unsigned_green_gauss also provides an integral without regard for flow directions:
+        CFL .+= unsigned_green_gauss(
+            part, fill(C[dim], length(uL)), dim
+        )
+
+        # dissipation
+        r .+= green_gauss(
+            part,
+            a .* face_gradient(part, u, dim), dim
+        )
+
+        # alternative with face gradient orthogonal corrections
+        ∇uf = face_gradient(part, u, ∇u, dim) # returns tuple with gradient along each dimension
+        r .+= green_gauss(
+            part,
+            a .* ∇uf[dim], dim
+        )
+    end
 end
-
-# ux is now the first, x-axis derivative of u
 ```
 
-```julia
-getalong(
-    part::Partition, 
-    U::AbstractArray, 
-    dim::Int, i::Int
-)
-```
-
-Obtain stencil index `i` along dimension `dim` in a partition array.
-`part(u, 0, 3, 0)` is equivalent to `ibm.getalong(part, u, 2, 3)`, for example.
-
-We also provide the following operators and utilities (check their docstrings!):
-
-```julia
-∇
-Δ
-δ
-μ
-MUSCL
-laplacian_smoothing
-stencil_average
-advection
-dissipation
-divergent
-```
+Check out the docstrings for utility `divergent()` as well!
 
 # Boundary conditions
 
 ```julia
 function impose_bc!(
     f,
-    part::Partition, bname::String,
+    dom::Domain, bname::String,
     args::AbstractArray...;
-    impose_at_ghost::Bool = false,
     kwargs...
 )
 ```
@@ -255,31 +264,27 @@ Impose boundary condition on domain array.
 Example for non-penetration condition:
 
 ```julia
-dom(u, v) do part, udom, vdom
-    # function receives values of field properties at image points
-    # and returns their values at the boundary
-    ibm.impose_bc!(part, "wall", udom, vdom) do bdry, uimage, vimage
-        nx, ny = bdry.normals |> eachcol
-        un = @. nx * uimage + ny * vimage
+# function receives values of field properties at image points
+# and returns their values at the boundary
+ibm.impose_bc!(dom, "wall", u, v) do bdry, uimage, vimage
+    nx, ny = bdry.normals |> eachcol
+    un = @. nx * uimage + ny * vimage
 
-        (
-            uimage .- un .* nx,
-            vimage .- un .* ny
-        )
-    end
+    (
+        uimage .- un .* nx,
+        vimage .- un .* ny
+    )
 end
 
 # alternative return value:
 uv = zeros(length(dom), 2)
 uv[:, 1] .= 1.0
-dom(uv) do part, uvdom
-    ibm.impose_bc!(part, "wall", uvdom) do bdry, uvim
-        uimage, vimage = eachcol(uvim)
-        nx, ny = eachcol(bdry.normals)
-        un = @. nx * uimage + ny * vimage
+ibm.impose_bc!(dom, "wall", uv) do bdry, uvim
+    uimage, vimage = eachcol(uvim)
+    nx, ny = eachcol(bdry.normals)
+    un = @. nx * uimage + ny * vimage
 
-        uvim .- un .* bdry.normals
-    end
+    uvim .- un .* bdry.normals
 end
 ```
 
@@ -288,69 +293,17 @@ Note that other field variable args. may be passed
 as auxiliary variables (e. g. the BC function may receive
 3 arrays as an input, and return BCs solely for the first two).
 
-We may directly return ghost cell values rather than boundary values
-by activating flag `impose_at_ghost`.
+Data for BC calculation includes:
 
 ```julia
-struct Boundary{Ti, Tf}
+struct Boundary{Ti <: Integer, Tf <: AbstractFloat}
     ghost_indices::AbstractVector{Ti}
-    ghost_distances::AbstractVector{Tf}
-    image_distances::AbstractVector{Tf}
-    points::AbstractMatrix{Tf}
+    projections::AbstractMatrix{Tf}
     normals::AbstractMatrix{Tf}
-    image_interpolator::NNInterpolator.Accumulator
+    image_distances::AbstractVector{Tf}
+    ghost_distances::AbstractVector{Tf}
 end
 ```
-
-# Solving linear systems
-
-You can solve linear systems using the `ImmersedBoundary.PointImplicit` module. Example for the Laplace equation:
-
-```julia
-using ImmersedBoundary.PointImplicit
-
-mgrid = Multigrid(domain, 4) # 4 levels
-
-function residual(u::AbstractVector)
-    r = similar(u)
-
-    domain(u, r) do part, u, r
-        r .= (
-            ∇(Δ(part, u, 1), 1) .+ ∇(Δ(part, u, 2), 2)
-        ) # plus BC impositions, however you wish to do them
-    end
-
-    r
-end
-
-u = zeros(length(domain))
-A, b, preconditioner = linearize(residual, u;
-    n_hutchinson_samples = 20) # uses Hutchinson's trick to estimate diagonals
-
-s, residual_ratio = solve(
-    A, b, preconditioner;
-    n_iter = 100, rtol = 1e-2, atol = 1e-7,
-    multigrid = mgrid, verbose = true
-)
-u .+= s
-
-# this works with more variables in the columns of a matrix as well.
-```
-
-# Explicit multigrid
-
-Function `MultigridDomain` is available to simultaneously build a few multigrid levels and the corresponding coarseners and prolongators. Example:
-
-```julia
-domain, coarse_domains, coarseners, prolongators = MultigridDomain(
-    3, # 3 mgrid levels
-    origins, widths, surfaces; kwargs...
-)
-# takes the same args and kwargs as Domain()
-```
-
-`coarseners[i]` and `prolongators[i]` are callable objects that interpolate any
-field property from level `i-1` to level `i`.
 
 # Postprocessing with surfaces
 
