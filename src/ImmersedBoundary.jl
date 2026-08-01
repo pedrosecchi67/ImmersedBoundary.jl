@@ -522,9 +522,8 @@ module ImmersedBoundary
     function Domain(
         msh::Mesh;
         max_partition_size::Int = 100_000,
-        partition_skirt_depth::Int = 1,
+        partition_skirt_depth::Int = 2,
         ghost_layer_ratio::Real = 1.5f0,
-        tolerance::Real = 1f-7,
         hypercube_families = [],
         verbose::Bool = false,
     )
