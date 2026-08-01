@@ -215,7 +215,7 @@ domain(r, u) do part, r, u # values at local domain
     a = 1f-3
 
     r .= 0
-    D = JST_sensor(part, D)
+    D = JST_sensor(part, u)
     for dim = 1:ndims(part)
         uL, uR = MUSCL(
             part, u, ∇u[dim], # cell value, grad. at cell center
