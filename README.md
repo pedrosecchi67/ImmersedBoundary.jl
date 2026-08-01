@@ -185,6 +185,12 @@ using CUDA
 
 conv_to_backend = x -> cu(x)
 conv_from_backend = x -> Array(x)
+
+dom(args...;
+    conv_to_backend = conv_to_backend,
+    conv_from_backend = conv_from_backend) do args...
+    # ...
+end
 ```
 
 # Grid operators
