@@ -1123,7 +1123,7 @@ module ImmersedBoundary
 
             uf = @. (uown * dneigh + uneigh * down) / (down + dneigh)
             if high_order
-                @. uf += (δuo - δun) / 8
+                @. uf += (δuo * down - δun * dneigh) / 8
             end
 
             @.  uL = uL * D + (1.0f0 - D) * uf
