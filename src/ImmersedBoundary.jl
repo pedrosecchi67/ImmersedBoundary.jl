@@ -815,6 +815,10 @@ module ImmersedBoundary
                         1, part.domain
                     ) |> copy, args
                 )
+
+                pimg_indom = part.image_in_domain
+                pimg = part.image
+
                 if !isnothing(conv_to_backend)
                     dargs = conv_to_backend.(dargs)
                     part = to_backend(part, conv_to_backend)
@@ -827,7 +831,7 @@ module ImmersedBoundary
                 end
 
                 for (a, da) in zip(args, dargs)
-                    selectdim(a, 1, part.image) .= selectdim(da, 1, part.image_in_domain)
+                    selectdim(a, 1, pimg) .= selectdim(da, 1, pimg_indom)
                 end
 
                 r
