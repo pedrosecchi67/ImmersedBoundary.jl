@@ -1074,11 +1074,7 @@ module ImmersedBoundary
         )
     end
 
-    @inline van_Leer(u1::Real, u2::Real) = (
-        u2 * sign(u1) + abs(u2)
-    ) / (
-        abs(u1) + abs(u2) + 1f-7
-    ) * u1
+    @inline minmod(u1::Real, u2::Real) = min(abs(u1), abs(u2)) * (sign(u1) + sign(u2)) / 2
 
     export MUSCL
     """
@@ -1114,7 +1110,7 @@ module ImmersedBoundary
             2 .* δun .- ∇uf
         ) .* dneigh
 
-        @. ∇uf = van_Leer(Δu, ∇u) # re-use buffer
+        @. ∇uf = minmod(Δu, ∇u) # re-use buffer
 
         uL, uR = (
             uown .+ ∇uf, uneigh .- ∇uf
