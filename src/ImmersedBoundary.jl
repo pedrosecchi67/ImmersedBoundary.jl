@@ -27,6 +27,8 @@ module ImmersedBoundary
 
     @declare_converter NNInterpolator.ArrayAccumulator.Accumulator
 
+    @declare_converter CFD.FlowBC
+
     export Stereolitography, refine_to_length, merge_points,
         Box, Ball, Line, DistanceField,
         feature_regions, centers_and_normals,
