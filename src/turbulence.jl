@@ -2,162 +2,57 @@ module Turbulence
 
     using DocStringExtensions
 
-    """
-    Function for a vectorized binary search.
-
-    Looks for the index of the last element in `u`
-    which is smaller than an entry in vector of query points `q`
-    """
-    function vector_binary_search(
-        q::AbstractVector, u::AbstractVector
-    )
-        i1 = similar(q, Int32, length(q))
-        i2 = similar(q, Int32, length(q))
-        i1 .= 1
-        i2 .= length(u)
-
-        complete = similar(q, Bool, length(q))
-        complete .= false
-
-        im = similar(i1)
-        while !all(complete)
-            @. im = (i1 + i2) ÷ 2
-            um = view(u, im)
-
-            @. i1 = (um < q) * im + (um >= q) * i1
-            @. i2 = (um < q) * i2 + (um >= q) * im
-
-            @. complete = complete || (i2 <= i1 + 1)
-        end
-
-        i1
-    end
-
-    """
-    Linear interpolation
-    """
-    function linear_interpolation(
-        xquery::AbstractVector, x::AbstractVector, y::AbstractVector
-    )
-        i = vector_binary_search(xquery, x)
-        inxt = i .+ 1
-
-        xl = @view x[i]
-        xn = @view x[inxt]
-        yl = @view y[i]
-        yn = @view y[inxt]
-
-        @. yl + (yn - yl) * (xquery - xl) / (xn - xl)
-    end
-
-    export WallFunction
-
-    """
-    $TYPEDFIELDS
-
-    Struct to hold wall function definitions
-    """
-    struct WallFunction
-        log10Rey::AbstractVector
-        log10y⁺::AbstractVector
-        κ::Real
-        A::Real
-        β::Real
-        βstar::Real
-        D::Real
-        A⁺::Real
-    end
+    export wall_function
 
     """
     $TYPEDSIGNATURES
 
-    Constructor for a wall function.
-
-    Uses Wilcox's expressions for near-wall `k⁺`,
-    and Nezu and Nakagawa's expressions for it in the log-law region.
-    Van Driest's approximation for `μ⁺` is used via differential equations
-    to calculate an interpolated solution for `y⁺`.
-
-    Wake function `g` is calculated as per a squared-cosinoidal wake layer profile.
+    Von-Karman law of the wall
     """
-    function WallFunction(
-        ; 
-        h0::Real = 0.01f0, 
-        growth_ratio::Real = 1.05f0,
-        y⁺_max::Real = 10000.0f0,
-        constant_layer_y⁺::Real = 15.0f0,
-        κ::Real = 0.41f0, A::Real = 19.0f0,
+    von_Karman(
+        y⁺;
+        κ::Real = 0.41f0, C::Real = 4.9f0
+    ) = (
+        @. min(log(max(y⁺, 1.0f0)) / κ + C, y⁺)
+    )
+
+    """
+    $TYPEDSIGNATURES
+
+    Run fixed-point iteration and figure out BL data
+    from `Rey = y × u / ν = y⁺ × u⁺`.
+
+    Returns tuple with fields `y⁺, u⁺, μ⁺, k⁺, du⁺!dy⁺`.
+    """
+    function wall_function(
+        Rey::AbstractVector;
+        κ::Real = 0.41f0, C::Real = 4.9f0, A::Real = 19.0f0,
         β::Real = 0.075f0, βstar::Real = 0.09f0,
         D::Real = 4.2f0, A⁺::Real = 360.0f0,
-        Cf_max::Real = 0.01f0,
+        ω_fixed_point::Real = 0.5f0, n_iter::Int = 20,
     )
-        h = h0
-
-        ϵ = 1f-10
-        yps = [ϵ, h]
-        ups = [ϵ, h]
-
-        while yps[end] < y⁺_max
-            yp = yps[end]
-            μ⁺ = κ * yp * (1.0f0 - exp(- yp / A)) ^ 2
-            du!dy = 1.0 / (μ⁺ + 1.0f0)
-
-            push!(
-                yps, yp + h
-            )
-            push!(
-                ups, ups[end] + h * du!dy
-            )
-
-            if yp > constant_layer_y⁺
-                h *= growth_ratio
-            end
-        end
-
-        g = @. sin(
-            yps / y⁺_max * π / 2
-        ) ^ 2
-        upmax = ups[end] + sqrt(2.0f0 / Cf_max)
-
-        @. ups = g * upmax + (1.0f0 - g) * ups
-
-        Rey = @. ups * yps
-
-        WallFunction(
-            log10.(Rey),
-            log10.(yps),
-            κ, A, β, βstar, D, A⁺
-        )
-    end
-
-    """
-    $TYPEDSIGNATURES
-
-    Obtain named tuple with `y⁺, u⁺, μ⁺, k⁺, du⁺!dy⁺` given a set of `Rey` values 
-    (Reynolds number in respect to local, laminar viscosity and the `y` 
-    position of the first cell center).
-    """
-    function (wf::WallFunction)(Rey::AbstractVector)
         ϵ = eps(eltype(Rey))
         Rey = @. clamp(abs(Rey), ϵ, Inf32)
 
-        # interpolated from previous diff. equation solution
-        log10Rey = log10.(Rey)
-        y⁺ = 10.0f0 .^ linear_interpolation(
-            log10Rey, wf.log10Rey, wf.log10y⁺
-        )
-        
-        u⁺ = Rey ./ y⁺
+        y⁺ = sqrt.(Rey) # start from laminar
+        u⁺ = similar(y⁺)
+
+        for _ = 1:n_iter
+            u⁺ .= von_Karman(y⁺; κ = κ, C = C)
+            @. y⁺ = ω_fixed_point * (Rey / u⁺) + (1.0f0 - ω_fixed_point) * y⁺
+        end
+
+        u⁺ .= Rey ./ y⁺
 
         # from van Driest
-        μ⁺ = @. wf.κ * y⁺ * (1.0f0 - exp(- y⁺ / wf.A)) ^ 2
+        μ⁺ = @. κ * y⁺ * (1.0f0 - exp(- y⁺ / A)) ^ 2
         du⁺!dy⁺ = @. 1.0f0 / (1.0f0 + μ⁺)
 
         # from Nakagawa-Nezu
         k⁺ = @. min(
-            y⁺ ^ 2 / (6.0f0 * wf.βstar / wf.β - 2.0f0),
-            wf.D * exp(
-                - y⁺ / wf.A⁺
+            y⁺ ^ 2 / (6.0f0 * βstar / β - 2.0f0),
+            D * exp(
+                - y⁺ / A⁺
             )
         )
 
@@ -173,19 +68,22 @@ module Turbulence
     """
     $TYPEDSIGNATURES
 
-    Obtain named tuple with `uτ, νₜ, k, ω, ϵ, du!dn` given a set of `y, u, ν` values 
+    Obtain named tuple with `uτ, νₜ, k, ω, ϵ, du!dn` given a set of `y, u, ν` 
+    values. Takes the same kwargs as other methods for the same function. 
     """
-    function (wf::WallFunction)(
-        y::AbstractVector, u::AbstractVector, ν::AbstractVector
+    function wall_function(
+        y::AbstractVector, u::AbstractVector, ν::AbstractVector;
+        βstar::Real = 0.09f0,
+        kwargs...
     )
-        nt = wf(u .* y ./ ν)
+        nt = wall_function(u .* y ./ ν; kwargs...)
 
         uτ = u ./ nt.u⁺
 
         νₜ = nt.μ⁺ .* ν
         k = nt.k⁺ .* uτ .^ 2
         ω = k ./ νₜ
-        ϵ = @. wf.βstar * ω * k
+        ϵ = @. βstar * ω * k
 
         du!dn = @. nt.du⁺!dy⁺ * uτ ^ 2 / ν
 

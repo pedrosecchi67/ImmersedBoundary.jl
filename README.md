@@ -376,7 +376,7 @@ TimeAverage
 
 using ImmersedBoundary.Turbulence
 
-WallFunction
+wall_function
 shear_rate
 Smagorinsky_νSGS
 Wray_Agarwal
@@ -393,9 +393,6 @@ Most data types support method `to_backend`:
 
 ```julia
 using CUDA: cu
-
-wf = WallFunction()
-wf = ImmersedBoundary.to_backend(wf, x -> cu(x))
 
 bc = FlowBC(fluid, P)
 bc = ImmersedBoundary.to_backend(bc, x -> cu(x))
