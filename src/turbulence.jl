@@ -241,7 +241,7 @@ module Turbulence
         @assert nd == 3 "WALE model only implemented for 3D"
 
         g = velocity_gradient
-        g2 = similar(g)
+        g2 = Matrix{AbstractVector}(undef, nd, nd)
         for i = 1:nd
             for j = 1:nd
                 s = similar(g[i, j])

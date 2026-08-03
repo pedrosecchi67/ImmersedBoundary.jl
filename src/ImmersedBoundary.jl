@@ -371,8 +371,8 @@ module ImmersedBoundary
         id::Int
         centers::AbstractMatrix{Tf}
         spacing::AbstractMatrix{Tf}
-        face_accumulators::Dict{Tuple{Int64, Bool}, Accumulator}
-        face_owners_neighbors::Dict{Int64, Tuple{AbstractVector{Ti}, AbstractVector{Ti}}}
+        face_accumulators::AbstractDict # Dict{Tuple{Int64, Bool}, Accumulator}
+        face_owners_neighbors::AbstractDict # Dict{Int64, Tuple{AbstractVector{Ti}, AbstractVector{Ti}}}
         domain::AbstractVector{Ti}
         image::AbstractVector{Ti}
         image_in_domain::AbstractVector{Ti}
@@ -470,9 +470,9 @@ module ImmersedBoundary
     struct Domain{Ti <: Integer, Tf <: AbstractFloat}
         ncells::Int
         mesh::Mesh
-        partitions::Dict{Int64, Partition{Ti, Tf}}
-        boundaries::Dict{String, Dict{Int64, Boundary{Ti, Tf}}}
-        surfaces::Dict{String, Surface{Ti, Tf}}
+        partitions::AbstractDict # Dict{Int64, Partition{Ti, Tf}}
+        boundaries::AbstractDict # Dict{String, Dict{Int64, Boundary{Ti, Tf}}}
+        surfaces::AbstractDict # Dict{String, Surface{Ti, Tf}}
     end
 
     """
