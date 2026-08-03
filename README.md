@@ -379,7 +379,9 @@ using ImmersedBoundary.Turbulence
 wall_function
 shear_rate
 Smagorinsky_νSGS
+WALE_νSGS
 Wray_Agarwal
+Ducros_sensor
 
 using ImmersedBoundary.IBL
 

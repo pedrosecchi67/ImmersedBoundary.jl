@@ -182,4 +182,100 @@ module Turbulence
         )
     end
 
+    export Ducros_sensor
+
+    """
+    $TYPEDSIGNATURES
+
+    Ducros shock sensor based on matrix of velocity gradients.
+
+    `velocity_gradient` is a matrix such that `velocity_gradient[i, j]`
+    indicates the gradient of vel. component `i` along dimension `j`.
+    """
+    function Ducros_sensor(
+        velocity_gradient::AbstractMatrix
+    )
+        ϵ = eps(eltype(velocity_gradient[1, 1]))
+
+        curl2 = similar(velocity_gradient[1, 1])
+        div2 = similar(velocity_gradient[1, 1])
+        nd = size(velocity_gradient, 1)
+
+        div2 .= 0
+        for i = 1:nd
+            div2 .+= velocity_gradient[i, i]
+        end
+        div2 .^= 2
+
+        if nd == 2
+            curl2 .= (
+                velocity_gradient[2, 1] .- velocity_gradient[1, 2]
+            ) .^ 2
+        elseif nd == 3
+            curl2 .= (
+                (velocity_gradient[3, 2] .- velocity_gradient[2, 3]) .^ 2 .+
+                (velocity_gradient[1, 3] .- velocity_gradient[3, 1]) .^ 2 .+
+                (velocity_gradient[2, 1] .- velocity_gradient[1, 2]) .^ 2
+            )
+        else
+            error("Ducros sensor only implemented for 2D and 3D")
+        end
+
+        @. (div2 + ϵ) / (div2 + curl2 + ϵ)
+    end
+
+    export WALE_νSGS
+
+    """
+    $TYPEDSIGNATURES
+
+    Wall-Adapting Local Eddy-viscosity (WALE) model for subgrid-scale viscosity.
+    """
+    function WALE_νSGS(
+        Δ::AbstractVector, velocity_gradient::AbstractMatrix;
+        Cw::Real = 0.325f0,
+    )
+        ϵ = eps(eltype(velocity_gradient[1, 1]))
+        nd = size(velocity_gradient, 1)
+
+        @assert nd == 3 "WALE model only implemented for 3D"
+
+        g = velocity_gradient
+        g2 = similar(g)
+        for i = 1:nd
+            for j = 1:nd
+                s = similar(g[i, j])
+                s .= 0
+
+                for k = 1:nd
+                    s .+= g[i, k] .* g[k, j]
+                end
+                g2[i, j] = s
+            end
+        end
+
+        SijSij = similar(velocity_gradient[1, 1])
+        SijSij .= 0
+        for i = 1:nd
+            for j = 1:nd
+                SijSij .+= (
+                    (g[i, j] .+ g[j, i]) ./ 2
+                ) .^ 2
+            end
+        end
+
+        SdijSdij = similar(velocity_gradient[1, 1])
+        SdijSdij .= 0
+        for i = 1:nd
+            for j = 1:nd
+                δ = (i == j)
+                SdijSdij .+= (
+                    (g2[i, j] .+ g2[j, i]) ./ 2 .- g2[i, j] .* (δ / 3)
+                ) .^ 2
+            end
+        end
+
+        @. Cw * Δ ^ 2 * (SdijSdij ^ 1.5f0) / (SijSij ^ 2.5f0 + SdijSdij ^ 1.25f0 + ϵ)
+    end
+
 end
