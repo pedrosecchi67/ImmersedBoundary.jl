@@ -660,20 +660,11 @@ module CFD
 
     Obtain viscous fluxes given a fluid, primitive variables and primitive variable gradients
     (a vector of matrices, with each matrix corresponding to the gradient along one axis).
-    Returns fluxes along all Cartesian dimensions.
-
-    Example:
-
-    ```
-    Pgrad = [
-        δ(part, P, dim) for dim = 1:3
-    ]
-    
-    Fvx, Fvy, Fvz = viscous_fluxes(fluid, P, Pgrad)
-    ```
     """
     function viscous_fluxes(
-        fluid::Fluid, P::AbstractMatrix, Pgrad::AbstractVector;
+        fluid::Fluid, P::AbstractMatrix, 
+        Pgrad::Union{AbstractVector, Tuple},
+        dim::Union{Int, AbstractMatrix};
         μₜ::Union{AbstractVector, Real} = 0.0f0
     )
         T = @view P[:, 2]
@@ -683,49 +674,65 @@ module CFD
 
         nd = size(P, 2) - 2
 
-        vel_grad = [
-            Pgrad[j][:, 2 + i] for i = 1:nd, j = 1:nd
-        ]
-        vels = [
-            P[:, 2 + dim] for dim = 1:nd
-        ]
+        vel_grad = (i, j) -> view(Pgrad[j], :, 2 + i)
 
         # shear tensor
         divu = similar(T)
         divu .= 0
         for i = 1:nd
-            divu .+= vel_grad[i, i]
+            divu .+= vel_grad(i, i)
         end
 
-        τ = [
-            (
-                (vel_grad[i, j] .+ vel_grad[j, i]) .- (i == j ? 2.0f0 / 3 : 0.0f0) .* divu
-            ) .* μ for i = 1:nd, j = 1:nd
-        ]
+        τ = (i, j) -> (
+            (vel_grad(i, j) .+ vel_grad(j, i)) .- (i == j ? 2.0f0 / 3 : 0.0f0) .* divu
+        ) .* μ
+
+        # velocity
+        vels = i -> view(P, :, 2 + i)
 
         # heat fluxes
-        f = [
-            pgrad[:, 2] .* k for pgrad in Pgrad
-        ]
+        f = i -> Pgrad[i][:, 2] .* k
 
-        [
-            let F = similar(P)
-                F .= 0.0f0
+        F = similar(P)
+        F .= 0.0f0
 
-                # energy
-                F[:, 2] .+= f[dim]
+        if dim isa Number
+            # energy
+            F[:, 2] .+= f(dim)
+            for j = 1:nd
+                F[:, 2] .+= τ(dim, j) .* vels(j)
+            end
+
+            # momentum
+            for j = 1:nd
+                F[:, 2 + j] .+= τ(dim, j)
+            end
+        else # direction as matrix
+            τdim = typeof(T)[]
+            for i = 1:nd
+                s = similar(T)
+                s .= 0
+
                 for j = 1:nd
-                    F[:, 2] .+= τ[dim, j] .* vels[j]
+                    s .+= τ(i, j) .* dim[:, j]
                 end
 
-                # momentum
-                for j = 1:nd
-                    F[:, 2 + j] .+= τ[dim, j]
-                end
+                push!(τdim, s)
+            end
 
-                F
-            end for dim = 1:nd
-        ]
+            # energy
+            for j = 1:nd
+                F[:, 2] .+= f(j) .* dim[:, j]
+                F[:, 2] .+= τdim[j] .* vels(j)
+            end
+
+            # momentum
+            for j = 1:nd
+                F[:, 2 + j] .+= τdim[j]
+            end
+        end
+
+        F
     end
 
     export TimeAverage
