@@ -381,6 +381,7 @@ shear_rate
 Smagorinsky_νSGS
 WALE_νSGS
 Wray_Agarwal
+standard_kϵ
 Ducros_sensor
 
 using ImmersedBoundary.IBL

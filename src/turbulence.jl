@@ -136,6 +136,63 @@ module Turbulence
         Cₛ::Real = 0.17f0,
     ) = (@. (Cₛ * Δ) ^ 2 * S)
 
+    export standard_kϵ
+
+    """
+    $TYPEDSIGNATURES
+
+    Closure for the standard k-ϵ turbulence model.
+
+    Returns named tuple with fields:
+
+    ```
+    (
+        Sk = (source term for k),
+        Sϵ = (source term for ϵ),
+        νk = (dissipation rate for k),
+        νϵ = (dissipation rate for ϵ),
+        νₜ = (eddy viscosity)
+    )
+    ```
+
+    Such that:
+
+    ```
+    kₜ = - ∇⋅(uk) + ∇⋅[(ν + νk) ∇k] + Sk
+    ϵₜ = - ∇⋅(uϵ) + ∇⋅[(ν + νϵ) ∇ϵ] + Sϵ
+    ```
+
+    Does not account for Buoyancy.
+
+    Remember: apply `k = ϵ = 0` at walls, and
+    ````
+    k∞ = 3 * (U∞ Tu) ^ 2 / 2
+    ϵ∞ = Cμ * k∞ ^ 2 / (3 * ν∞)
+    Cμ = 0.09
+    Tu ≈ 0.10
+    ```
+    """
+    function standard_kϵ(
+        k::Union{AbstractVector, Real}, ϵ::Union{AbstractVector, Real}, S::Union{AbstractVector, Real};
+        Cμ::Real = 0.09f0, σk::Real = 1.0f0, σϵ::Real = 1.3f0,
+        C1ϵ::Real = 1.44f0, C2ϵ::Real = 1.92f0,
+    )
+        νₜ = @. Cμ * k ^ 2 / ϵ
+
+        Pk = @. νₜ * S ^ 2
+
+        Sk = @. Pk - ϵ
+        Sϵ = @. C1ϵ * Pk * ϵ / k - C2ϵ * ϵ ^ 2 / k
+
+        (
+            νk = νₜ ./ σk,
+            νϵ = νₜ ./ σϵ,
+            Sk = Sk,
+            Sϵ = Sϵ,
+            νₜ = νₜ,
+        )
+    end
+
     export Wray_Agarwal
 
     """
