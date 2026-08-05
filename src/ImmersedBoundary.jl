@@ -21,6 +21,8 @@ module ImmersedBoundary
     using .CFD
     include("turbulence.jl")
     using .Turbulence
+    include("solver.jl")
+    using .Solver
 
     include("arraybends.jl")
     using .ArrayBackends

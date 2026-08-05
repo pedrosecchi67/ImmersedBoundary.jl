@@ -388,6 +388,10 @@ using ImmersedBoundary.IBL
 
 m_closure
 θ_closure
+
+using ImmersedBoundary.Solver
+
+FAS!
 ```
 
 # Other types in custom array backends
