@@ -231,6 +231,7 @@ module Turbulence
         S = let ∇R∇S = sum(∇R .* ∇S; dims = 2) |> vec
             @. C₁ * R * S + C₂ * ∇R∇S * (R / (S + ϵ))
         end
+        @. S = clamp(S, -10.0f0 * R, 10.0f0 * R)
 
         (
             νₜ = R,
