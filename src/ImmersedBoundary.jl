@@ -745,8 +745,7 @@ module ImmersedBoundary
                     fcenters, fnormals = centers_and_normals(stl)
                     idx, _ = nn(tree, fcenters)
 
-                    h = diams[idx] .* ghost_layer_ratio # face offset defined by nearest
-                    # cell
+                    h = diams[idx] .* 1.01f0 # face offset defined by nearest cell
                     A = sum(fnormals' .^ 2; dims = 2) |> vec |> x -> sqrt.(x) .+ eps(Tf)
                     fnormals = fnormals' ./ A
                     fcenters = permutedims(fcenters)
@@ -757,7 +756,7 @@ module ImmersedBoundary
                         fnormals, A,
                         Interpolator(centers', fcenters,
                             tree; first_index = true, bias = bias),
-                        Interpolator(centers', fcenters .+ bias,
+                        Interpolator(centers', fcenters .+ bias .* ghost_layer_ratio,
                             tree; first_index = true),
                         stl
                     )
@@ -1403,6 +1402,30 @@ module ImmersedBoundary
         Base.GC.gc()
 
         (coarse_doms, prolongators, coarseners)
+    end
+
+    export volume_integral
+    """
+    $TYPEDSIGNATURES
+
+    Integrate variable over the volume of the domain
+    """
+    function volume_integral(dom::Domain, A::AbstractArray)
+        Ai = copy(A)
+        dom(Ai) do part, Ai
+            for dim = 1:ndims(part)
+                Ai .*= part.spacing[:, dim]
+            end
+        end
+
+        s = sum(Ai; dims = 1)
+        if ndims(s) == 1
+            s = s[1]
+        else
+            s = dropdims(s; dims = 1)
+        end
+
+        s
     end
 
 end
