@@ -77,10 +77,15 @@ module NNInterpolator
         (def. false).
 
     Uses `k` closest points as stencils (def. `2^ndims`).
+
+    `bias` (a matrix) may be provided such that nearest neighbors queries are performed
+    for `Xc + bias`, such that the interpolation stencil is offset from the actual interpolation
+    point.
     """
     function Interpolator(
         X::AbstractMatrix, Xc::AbstractMatrix,
         tree::Union{KDTree, Nothing} = nothing;
+        bias::Union{Nothing, AbstractMatrix} = nothing,
         first_index::Bool = false,
         linear::Bool = true,
         k::Int = 0,
@@ -88,6 +93,9 @@ module NNInterpolator
         if first_index
             X = permutedims(X)
             Xc = permutedims(Xc)
+            if !isnothing(bias)
+                bias = permutedims(bias)
+            end
         end
 
         if k == 0
@@ -104,13 +112,18 @@ module NNInterpolator
             (X, idxs, x) -> IDW_weights(X, idxs, x)
         )
 
+        Xq = Xc
+        if !isnothing(bias)
+            Xq = Xq .+ bias
+        end
+
         idxs, ws = let tups = map(
-            x -> let idxs = knn(
-                tree, x, k
+            (x, xq) -> let idxs = knn(
+                tree, xq, k
             )[1]
                 get_weights(X, idxs, x)
             end,
-            eachcol(Xc)
+            eachcol(Xc), eachcol(Xq)
         )
             (
                 map(t -> t[2], tups),
