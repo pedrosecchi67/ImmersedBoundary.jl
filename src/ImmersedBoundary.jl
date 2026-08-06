@@ -338,6 +338,7 @@ module ImmersedBoundary
         normals::AbstractMatrix{Tf}
         areas::AbstractVector{Tf}
         interpolator::NNInterpolator.Accumulator
+        offset_interpolator::NNInterpolator.Accumulator
         stl::Stereolitography
     end
 
@@ -365,6 +366,14 @@ module ImmersedBoundary
     Obtain values of field property array `u` at surface control points.
     """
     (surf::Surface)(u::AbstractArray) = surf.interpolator(u)
+
+    export at_offset
+    """
+    $TYPEDSIGNATURES
+
+    Obtain values of field property array `u` at an offset from surface control points.
+    """
+    at_offset(surf::Surface, u::AbstractArray) = surf.offset_interpolator(u)
 
     """
     $TYPEDFIELDS
@@ -742,10 +751,13 @@ module ImmersedBoundary
                     fnormals = fnormals' ./ A
                     fcenters = permutedims(fcenters)
 
+                    bias = fnormals .* h
                     surfaces[bname] = Surface{Ti, Tf}(
                         fcenters, h,
                         fnormals, A,
-                        Interpolator(centers', fcenters .+ fnormals .* h,
+                        Interpolator(centers', fcenters,
+                            tree; first_index = true, bias = bias),
+                        Interpolator(centers', fcenters .+ bias,
                             tree; first_index = true),
                         stl
                     )
