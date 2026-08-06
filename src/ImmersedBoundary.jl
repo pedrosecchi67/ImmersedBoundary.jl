@@ -1362,7 +1362,7 @@ module ImmersedBoundary
 
         bsize = msh.block_size
         for nit = 1:max_levels
-            bsize = bsize ÷ 2
+            bsize = bsize ÷ factor
 
             verbose && println("Building domain for multigrid level $nit...")
             cdom = coarsen_mesh(bsize) |> msh -> Domain(msh; 
