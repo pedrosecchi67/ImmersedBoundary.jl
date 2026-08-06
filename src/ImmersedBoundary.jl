@@ -1268,7 +1268,9 @@ module ImmersedBoundary
     wall = dom.surfaces["wall"]
 
     surface_data = Dict(
-        "wall" => wall(τ) # interpolating to boundary
+        "wall" => (
+            τ = wall(τ)
+        ), # interpolating to boundary
     )
     ```
     """
