@@ -325,12 +325,12 @@ CX, CY = surface_integral(
 )
 ```
 
-Values are obtained an offset away from the surface (see `surf.offsets`) in order to obtain values like `τ` at the wall in wall-modelled simulations.
+Values can be obtained an offset away from the surface (see `surf.offsets`) in order to obtain values like `τ` at the wall in wall-modelled simulations:
 
 ```julia
 surf = dom.surfaces["wall"]
 
-τ = μ .* surf(V) ./ surf.offsets # wall-normal gradient
+τ = μ .* at_offset(surf, V) ./ surf.offsets # wall-normal shear stress
 ```
 
 To export, the kwarg `surface_data` is available in `export_vtk`:
