@@ -1346,7 +1346,7 @@ module ImmersedBoundary
         _mdepth = log2(msh.block_size) |> floor |> Int64
         max_levels = (max_levels == 0 ? _mdepth : max_levels)
 
-        coarse_doms = Domain[dom]
+        coarse_doms = Domain[]
         coarseners = Accumulator[]
         prolongators = Accumulator[]
 
