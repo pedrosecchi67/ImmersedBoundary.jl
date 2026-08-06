@@ -1,5 +1,7 @@
 module Solver
 
+export FAS!
+
 using LinearAlgebra
 
 """

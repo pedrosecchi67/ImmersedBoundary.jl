@@ -477,6 +477,7 @@ module ImmersedBoundary
         partitions::AbstractDict # Dict{Int64, Partition{Ti, Tf}}
         boundaries::AbstractDict # Dict{String, Dict{Int64, Boundary{Ti, Tf}}}
         surfaces::AbstractDict # Dict{String, Surface{Ti, Tf}}
+        reconstruction_kwargs::NamedTuple
     end
 
     """
@@ -756,12 +757,20 @@ module ImmersedBoundary
 
         verbose && println("==Done with domain definition!==")
 
+        reconstruction_kwargs = (
+            max_partition_size = max_partition_size,
+            partition_skirt_depth = partition_skirt_depth,
+            ghost_layer_ratio = ghost_layer_ratio,
+            hypercube_families = deepcopy(hypercube_families),
+        )
+
         Domain{Ti, Tf}(
             ncells,
             msh,
             partitions,
             boundaries,
             surfaces,
+            reconstruction_kwargs,
         )
     end
 
@@ -1304,6 +1313,84 @@ module ImmersedBoundary
 
             vtk_save(vtm)
         end
+    end
+
+    export multigrid
+    """
+    $TYPEDSIGNATURES
+
+    Obtain from initial, fine domain, vector of coarse domains,
+    vector of coarseners and vector of prolongators for multigrid.
+
+    Coarseners and prolongators are callables such that `coarseners[i]`
+    coarsens properties from level `i` to level `i - 1`, and the opposite
+    is true of `prolongators[i]`.
+
+    The interpolations are used as:
+
+    ```
+    coarse_doms, coarseners, prolongators = multigrid(dom)
+
+    P = rand(length(dom), 5) # array, first index identifies cell
+
+    Pc = coarseners[1](P)
+    P .= prolongators[1](Pc)
+    ```
+
+    Check out `ImmersedBoundary.Solver.FAS!`!
+    """
+    function multigrid(dom::Domain{Ti, Tf}, max_levels::Int = 0; factor::Int = 2,
+        verbose::Bool = false,) where {Ti, Tf}
+        msh = dom.mesh
+
+        _mdepth = log2(msh.block_size) |> floor |> Int64
+        max_levels = (max_levels == 0 ? _mdepth : max_levels)
+
+        coarse_doms = Domain[dom]
+        coarseners = Accumulator[]
+        prolongators = Accumulator[]
+
+        coarsen_mesh = bsize -> Mesh(
+            msh.origin, msh.widths, bsize, msh.block_origins, msh.block_widths, msh.distance_fields
+        )
+
+        Xold = Matrix{Tf}(undef, length(dom), ndims(dom)); Xold .= 0
+        dom(Xold) do part, Xold
+            Xold .= part.centers
+        end
+        tree_old = KDTree(Xold')
+
+        bsize = msh.block_size
+        for nit = 1:max_levels
+            bsize = bsize ÷ 2
+
+            verbose && println("Building domain for multigrid level $nit...")
+            cdom = coarsen_mesh(bsize) |> msh -> Domain(msh; 
+                verbose = verbose, dom.reconstruction_kwargs...)
+
+            X = Matrix{Tf}(undef, length(cdom), ndims(cdom)); X .= 0
+            cdom(X) do part, X
+                X .= part.centers
+            end
+            tree = KDTree(X')
+
+            verbose && println("Building coarsener and prolongator for level $nit...")
+            coarsener = Interpolator(Xold, X, tree_old; first_index = true, linear = false)
+            prolongator = Interpolator(X, Xold, tree; first_index = true, linear = false)
+
+            push!(coarse_doms, cdom)
+            push!(prolongators, prolongator)
+            push!(coarseners, coarsener)
+
+            tree_old = tree
+            Xold = X
+
+            Base.GC.gc()
+        end
+        tree_old = nothing; Xold = nothing;
+        Base.GC.gc()
+
+        (coarse_doms, prolongators, coarseners)
     end
 
 end
