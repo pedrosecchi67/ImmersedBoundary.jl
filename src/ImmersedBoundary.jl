@@ -1108,7 +1108,7 @@ module ImmersedBoundary
     A Ducros-type shock sensor may be provided in kwarg `D`. If zero, a centered, 
     second-order scheme is used. If `high_order` is true, a fourth-order 
     Pade scheme substitutes it. 
-    If one, MUSCL with the van-Leer limiter is used.
+    If one, MUSCL with the minmod limiter is used.
     """
     function MUSCL(
         part::Partition{Ti, Tf}, 
