@@ -9,7 +9,7 @@ module BlockMesher
     using WriteVTK
 
     export Stereolitography, refine_to_length, merge_points,
-        Box, Ball, Line, DistanceField,
+        Box, Ball, Line, DistanceField, AMR_fields,
         feature_regions, centers_and_normals,
         vtk_grid, vtk_save,
         Mesh, get_cells
@@ -1182,6 +1182,111 @@ module BlockMesher
         end
 
         vtm
+    end
+
+    module AMR
+
+        export AMR_fields
+
+        using ..NearestNeighbors
+
+        using ..DocStringExtensions
+
+        """
+        $TYPEDFIELDS
+
+        Struct to define an AMR distance field
+        """
+        struct AMRField
+            tree::KDTree
+
+            AMRField(X::AbstractMatrix{Tf}) where {Tf <: AbstractFloat} = new(
+                KDTree(X)
+            )
+        end
+
+        """
+        $TYPEDSIGNATURES
+
+        Obtain evaluation of AMR distance field upon a point in space
+        """
+        (field::AMRField)(x::AbstractVector) = nn(field.tree, x)[2]
+
+        """
+        $TYPEDSIGNATURES
+
+        Get distance fields according to AMR.
+        Returns array of callable struct and local refinement pairs
+        for each new refinement level. Each callable struct, when
+        called upon a point/coord. array, returns the distance to
+        the nearest point where such a refinement level is prescribed.
+
+        Points are received as row-major arrays.
+        """
+        function AMR_fields(
+            points::AbstractMatrix{Tf}, local_ref_levels::AbstractVector{Tf}
+        ) where {Tf <: AbstractFloat}
+            points = permutedims(points)
+
+            L = 2 * minimum(local_ref_levels)
+
+            fields = []
+
+            while length(local_ref_levels) > 0
+                this_level = @. local_ref_levels <= L
+
+                if sum(this_level) > 0
+                    push!(
+                        fields,
+                        (
+                            AMRField(points[:, this_level]) => L / 2
+                        )
+                    )
+
+                    next_level = @. !this_level
+                    points = points[:, next_level]
+                    local_ref_levels = local_ref_levels[next_level]
+                end
+
+                L *= 2
+            end
+
+            fields
+        end
+
+    end
+    using .AMR
+
+    """
+    $TYPEDSIGNATURES
+
+    Coarsen grid via size reduction factor
+    """
+    function coarsen(
+        msh::Mesh, factor::Int = 2;
+        verbose::Bool = false, kwargs...
+    )
+        bsize = msh.block_size ÷ factor
+        if bsize < 1 # no longer in blocks, coarsen with
+            # AMR fields
+            centers = msh.block_origins .+ msh.block_widths ./ 2 |> permutedims
+            sizes = maximum(msh.block_widths; dims = 1) .* factor |> vec
+            bsize = 1
+
+            return Mesh(
+                msh.origin, msh.widths;
+                block_size = bsize, verbose = verbose,
+                refinement_regions = AMR_fields(centers, sizes)
+            )
+        end
+
+        # coarsen via block size reduction
+        Mesh(
+            msh.origin, msh.widths, 
+            bsize,
+            msh.block_origins, msh.block_widths,
+            msh.distance_fields
+        )
     end
 
 end

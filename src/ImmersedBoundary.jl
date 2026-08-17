@@ -32,7 +32,7 @@ module ImmersedBoundary
     @declare_converter CFD.FlowBC
 
     export Stereolitography, refine_to_length, merge_points,
-        Box, Ball, Line, DistanceField,
+        Box, Ball, Line, DistanceField, AMR_fields,
         feature_regions, centers_and_normals,
         vtk_grid, vtk_save,
         Mesh, Domain
@@ -714,7 +714,7 @@ module ImmersedBoundary
             diams = sum(widths .^ 2; dims = 1) |> vec |> x -> sqrt.(x)
 
             for (bname, faces) in hypercube_families
-                println("Defining boundary $bname...")
+                verbose && println("Defining boundary $bname...")
 
                 ghosts, projs = ghosts_and_projections(faces, msh;
                     ghost_layer_ratio = ghost_layer_ratio, verbose = verbose)
@@ -727,7 +727,7 @@ module ImmersedBoundary
             end
 
             for (bname, dfield) in msh.distance_fields
-                println("Defining boundary $bname...")
+                verbose && println("Defining boundary $bname...")
 
                 begin
                     ghosts, projs = ghosts_and_projections(dfield, msh;
@@ -1342,7 +1342,7 @@ module ImmersedBoundary
     The interpolations are used as:
 
     ```
-    coarse_doms, coarseners, prolongators = multigrid(dom)
+    coarse_doms, coarseners, prolongators = multigrid(dom, 5)
 
     P = rand(length(dom), 5) # array, first index identifies cell
 
@@ -1352,33 +1352,24 @@ module ImmersedBoundary
 
     Check out `ImmersedBoundary.Solver.FAS!`!
     """
-    function multigrid(dom::Domain{Ti, Tf}, max_levels::Int = 0; factor::Int = 2,
+    function multigrid(dom::Domain{Ti, Tf}, levels::Int; factor::Int = 2,
         verbose::Bool = false,) where {Ti, Tf}
-        msh = dom.mesh
-
-        _mdepth = log2(msh.block_size) |> floor |> Int64
-        max_levels = (max_levels == 0 ? _mdepth : max_levels)
-
         coarse_doms = Domain[]
         coarseners = Accumulator[]
         prolongators = Accumulator[]
-
-        coarsen_mesh = bsize -> Mesh(
-            msh.origin, msh.widths, bsize, msh.block_origins, msh.block_widths, msh.distance_fields
-        )
 
         Xold = Matrix{Tf}(undef, length(dom), ndims(dom)); Xold .= 0
         dom(Xold) do part, Xold
             Xold .= part.centers
         end
         tree_old = KDTree(Xold')
+        msh = dom.mesh
 
-        bsize = msh.block_size
-        for nit = 1:max_levels
-            bsize = bsize ÷ factor
-
+        for nit = 1:levels
             verbose && println("Building domain for multigrid level $nit...")
-            cdom = coarsen_mesh(bsize) |> msh -> Domain(msh; 
+            cmsh = BlockMesher.coarsen(msh, factor; 
+                verbose = verbose)
+            cdom = Domain(cmsh; 
                 verbose = verbose, dom.reconstruction_kwargs...)
 
             X = Matrix{Tf}(undef, length(cdom), ndims(cdom)); X .= 0
@@ -1397,6 +1388,7 @@ module ImmersedBoundary
 
             tree_old = tree
             Xold = X
+            msh = cmsh
 
             Base.GC.gc()
         end

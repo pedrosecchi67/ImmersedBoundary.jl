@@ -116,6 +116,8 @@ msh = Mesh(
 @show length(msh) # number of cells
 ```
 
+Also, check out the docstring for `AMR_fields`!
+
 # Creating domain
 
 You can turn a mesh into a domain with all the information necessary for residual computation with:
@@ -391,6 +393,7 @@ m_closure
 
 using ImmersedBoundary.Solver
 
+multigrid
 FAS!
 ```
 

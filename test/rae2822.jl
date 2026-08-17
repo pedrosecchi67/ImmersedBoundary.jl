@@ -33,8 +33,9 @@ begin
         bdry.normals[:, 2]
     end
 
-    coarse_doms, coarseners, prolongators = multigrid(dom)
+    coarse_doms, coarseners, prolongators = multigrid(dom, 6; verbose = true)
     
     export_vtk("rae2822", dom; ny = ny,)
+    export_vtk("rae2822_mid", coarse_doms[3])
     export_vtk("rae2822_coarse", coarse_doms[end])
 end
