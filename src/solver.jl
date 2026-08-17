@@ -41,7 +41,7 @@ function FAS!(
     coarseners = [], prolongators = [],
     perscribed_f::Union{AbstractArray, Nothing} = nothing,
     multigrid_level::Int = 0,
-    n_iter::Int = 50,
+    n_iter::Int = 50, n_cycles::Int = 1,
     rtol::Real = 1.0f-1, atol::Real = 1.0f-7,
 ) where {Tf <: AbstractFloat}
     l = multigrid_level
@@ -57,32 +57,41 @@ function FAS!(
     nr0 = norm(r)
     nr = nr0
 
-    if length(coarseners) > 1
-        coars = coarseners[1]
-        prolong = prolongators[1]
+    for _ = 1:n_cycles
+        if length(coarseners) > 1
+            coars = coarseners[1]
+            prolong = prolongators[1]
 
-        Qc = coars(Q)
-        Qcold = copy(Qc)
+            Qc = coars(Q)
+            Qcold = copy(Qc)
 
-        pfQc = coars(r)
+            pfQc = coars(r)
 
-        FAS!(
-            f, Qc;
-            coarseners = coarseners[2:end], prolongators = prolongators[2:end],
-            perscribed_f = pfQc, multigrid_level = multigrid_level + 1,
-            n_iter = n_iter, atol = atol, rtol = rtol,
-        )
+            FAS!(
+                f, Qc;
+                coarseners = coarseners[2:end], prolongators = prolongators[2:end],
+                perscribed_f = pfQc, multigrid_level = multigrid_level + 1,
+                n_iter = n_iter, n_cycles = 1,
+                atol = atol, rtol = rtol,
+            )
 
-        Q .+= prolong(Qc .- Qcold)
-    end
+            Q .+= prolong(Qc .- Qcold)
+        end
 
-    for _ = 1:n_iter
-        r, ω = f(l, Q)
-        @. r += source
-        @. Q += clamp(ω, 0.0f0, 1.0f0) * r
+        bcycle = false # should we break the multigrid cycles?
+        for _ = 1:n_iter
+            r, ω = f(l, Q)
+            @. r += source
+            @. Q += clamp(ω, 0.0f0, 1.0f0) * r
 
-        nr = norm(r)
-        if nr < nr0 * rtol + atol
+            nr = norm(r)
+            if nr < nr0 * rtol + atol
+                bcycle = true
+                break
+            end
+        end
+
+        if bcycle
             break
         end
     end
