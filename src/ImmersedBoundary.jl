@@ -888,7 +888,7 @@ module ImmersedBoundary
     """
     at_neighbors(part::Partition{Ti, Tf}, u::AbstractArray, dim::Int) where {Ti, Tf} = selectdim(
         u, 1, part.face_owners_neighbors[dim][2]
-    ) |> copy
+    )
 
     export at_faces
     """
