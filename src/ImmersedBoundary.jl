@@ -194,8 +194,7 @@ module ImmersedBoundary
     function ghosts_and_projections(
         dfield::DistanceField,
         centers::AbstractMatrix{Tf}, widths::AbstractMatrix{Tf};
-        ghost_layer_ratio::Real = 1.5f0, 
-        approximate_bcs::Bool = false,
+        ghost_layer_ratio::Real = 1.5f0,
         verbose::Bool = false,
     ) where {Tf <: AbstractFloat}
         Ti = (
@@ -219,12 +218,8 @@ module ImmersedBoundary
 
         @threads for k in iterator
             g = ghosts[k]
-            if approximate_bcs
-                projs[:, k] .= BlockMesher.projection(dfield, centers[:, g], 
-                    diams[g] * ghost_layer_ratio * 2)
-            else
-                projs[:, k] .= BlockMesher.projection(dfield, centers[:, g])
-            end
+            projs[:, k] .= BlockMesher.projection(dfield, centers[:, g], 
+                diams[g] * ghost_layer_ratio * 2)
         end
 
         mask = let dists = sum((projs .- centers[:, ghosts]) .^ 2; dims = 1) |> vec |> x -> sqrt.(x)
@@ -245,13 +240,11 @@ module ImmersedBoundary
     ghosts_and_projections(
         dfield::DistanceField, msh::Mesh;
         ghost_layer_ratio::Real = 1.5f0,
-        approximate_bcs::Bool = false,
         verbose::Bool = false,
     ) = let (centers, widths, _) = (
         BlockMesher.get_cells(msh)
     )
         ghosts_and_projections(dfield, centers, widths; 
-            approximate_bcs = approximate_bcs,
             ghost_layer_ratio = ghost_layer_ratio, verbose = verbose)
     end
 
@@ -493,6 +486,7 @@ module ImmersedBoundary
         partitions::AbstractDict # Dict{Int64, Partition{Ti, Tf}}
         boundaries::AbstractDict # Dict{String, Dict{Int64, Boundary{Ti, Tf}}}
         surfaces::AbstractDict # Dict{String, Surface{Ti, Tf}}
+        reconstruction_kwargs::NamedTuple
     end
 
     """
@@ -545,7 +539,6 @@ module ImmersedBoundary
         partition_skirt_depth::Int = 2,
         ghost_layer_ratio::Real = 1.5f0,
         hypercube_families = [],
-        approximate_bcs::Bool = false,
         verbose::Bool = false,
     )
         verbose && println("==Initiating domain definition procedure...==")
@@ -738,7 +731,6 @@ module ImmersedBoundary
 
                 begin
                     ghosts, projs = ghosts_and_projections(dfield, msh;
-                        approximate_bcs = approximate_bcs,
                         ghost_layer_ratio = ghost_layer_ratio, verbose = verbose)
                     projs = permutedims(projs)
 
@@ -776,12 +768,20 @@ module ImmersedBoundary
 
         verbose && println("==Done with domain definition!==")
 
+        reconstruction_kwargs = (
+            max_partition_size = max_partition_size,
+            partition_skirt_depth = partition_skirt_depth,
+            ghost_layer_ratio = ghost_layer_ratio,
+            hypercube_families = deepcopy(hypercube_families),
+        )
+
         Domain{Ti, Tf}(
             ncells,
             msh,
             partitions,
             boundaries,
             surfaces,
+            reconstruction_kwargs,
         )
     end
 
@@ -1332,8 +1332,8 @@ module ImmersedBoundary
     """
     $TYPEDSIGNATURES
 
-    Obtain from arguments and kwargs for `BlockMesher.Mesh()` a fine domain,
-    an array of coarse domains, an array of coarseners and an array of prolongators.
+    Obtain from initial, fine domain, vector of coarse domains,
+    vector of coarseners and vector of prolongators for multigrid.
 
     Coarseners and prolongators are callables such that `coarseners[i]`
     coarsens properties from level `i` to level `i - 1`, and the opposite
@@ -1342,11 +1342,7 @@ module ImmersedBoundary
     The interpolations are used as:
 
     ```
-    dom, coarse_doms, coarseners, prolongators = multigrid(
-        5,
-        ("wall", stl, 1f-2);
-        verbose = true
-    )
+    coarse_doms, coarseners, prolongators = multigrid(dom, 5)
 
     P = rand(length(dom), 5) # array, first index identifies cell
 
@@ -1356,55 +1352,27 @@ module ImmersedBoundary
 
     Check out `ImmersedBoundary.Solver.FAS!`!
     """
-    function multigrid(levels::Int, 
-        origin::AbstractVector, widths::AbstractVector,
-        surfaces...; 
-        factor::Int = 2,
-        verbose::Bool = false,
-        refinement_regions::AbstractVector = [],
-        hypercube_families::AbstractVector = [],
-        kwargs...
-    )
+    function multigrid(dom::Domain{Ti, Tf}, levels::Int; factor::Int = 2,
+        verbose::Bool = false,) where {Ti, Tf}
         coarse_doms = Domain[]
         coarseners = Accumulator[]
         prolongators = Accumulator[]
 
-        coarsegrid = l -> let m = factor ^ l
-            _surfaces = [
-                (stl, sname, h * m) for (stl, sname, h) in surfaces
-            ]
-            _rfields = [
-                f => h * m for (f, h) in refinement_regions
-            ]
-
-            BlockMesher.Mesh(
-                origin, widths, _surfaces...;
-                verbose = verbose,
-                refinement_regions = _rfields,
-                kwargs...
-            )
-        end
-        todom = (l, msh) -> Domain(msh; 
-                approximate_bcs = l > 0,
-                hypercube_families = hypercube_families,
-                verbose = verbose,)
-
-        verbose && println("Building first grid level...")
-        msh = coarsegrid(0)
-        dom = todom(0, msh)
-
-        Xold = Matrix{Float32}(undef, length(dom), ndims(dom)); Xold .= 0
+        Xold = Matrix{Tf}(undef, length(dom), ndims(dom)); Xold .= 0
         dom(Xold) do part, Xold
             Xold .= part.centers
         end
         tree_old = KDTree(Xold')
+        msh = dom.mesh
 
         for nit = 1:levels
             verbose && println("Building domain for multigrid level $nit...")
-            cmsh = coarsegrid(nit)
-            cdom = todom(nit, cmsh)
+            cmsh = BlockMesher.coarsen(msh, factor; 
+                verbose = verbose)
+            cdom = Domain(cmsh; 
+                verbose = verbose, dom.reconstruction_kwargs...)
 
-            X = Matrix{Float32}(undef, length(cdom), ndims(cdom)); X .= 0
+            X = Matrix{Tf}(undef, length(cdom), ndims(cdom)); X .= 0
             cdom(X) do part, X
                 X .= part.centers
             end
@@ -1420,13 +1388,14 @@ module ImmersedBoundary
 
             tree_old = tree
             Xold = X
+            msh = cmsh
 
             Base.GC.gc()
         end
         tree_old = nothing; Xold = nothing;
         Base.GC.gc()
 
-        (dom, coarse_doms, coarseners, prolongators)
+        (coarse_doms, prolongators, coarseners)
     end
 
     export volume_integral
