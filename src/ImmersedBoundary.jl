@@ -194,7 +194,8 @@ module ImmersedBoundary
     function ghosts_and_projections(
         dfield::DistanceField,
         centers::AbstractMatrix{Tf}, widths::AbstractMatrix{Tf};
-        ghost_layer_ratio::Real = 1.5f0,
+        ghost_layer_ratio::Real = 1.5f0, 
+        approximate_bcs::Bool = false,
         verbose::Bool = false,
     ) where {Tf <: AbstractFloat}
         Ti = (
@@ -218,8 +219,12 @@ module ImmersedBoundary
 
         @threads for k in iterator
             g = ghosts[k]
-            projs[:, k] .= BlockMesher.projection(dfield, centers[:, g], 
-                diams[g] * ghost_layer_ratio * 2)
+            if approximate_bcs
+                projs[:, k] .= BlockMesher.projection(dfield, centers[:, g], 
+                    diams[g] * ghost_layer_ratio * 2)
+            else
+                projs[:, k] .= BlockMesher.projection(dfield, centers[:, g])
+            end
         end
 
         mask = let dists = sum((projs .- centers[:, ghosts]) .^ 2; dims = 1) |> vec |> x -> sqrt.(x)
@@ -240,11 +245,13 @@ module ImmersedBoundary
     ghosts_and_projections(
         dfield::DistanceField, msh::Mesh;
         ghost_layer_ratio::Real = 1.5f0,
+        approximate_bcs::Bool = false,
         verbose::Bool = false,
     ) = let (centers, widths, _) = (
         BlockMesher.get_cells(msh)
     )
         ghosts_and_projections(dfield, centers, widths; 
+            approximate_bcs = approximate_bcs,
             ghost_layer_ratio = ghost_layer_ratio, verbose = verbose)
     end
 
@@ -539,6 +546,7 @@ module ImmersedBoundary
         partition_skirt_depth::Int = 2,
         ghost_layer_ratio::Real = 1.5f0,
         hypercube_families = [],
+        approximate_bcs::Bool = false,
         verbose::Bool = false,
     )
         verbose && println("==Initiating domain definition procedure...==")
@@ -731,6 +739,7 @@ module ImmersedBoundary
 
                 begin
                     ghosts, projs = ghosts_and_projections(dfield, msh;
+                        approximate_bcs = approximate_bcs,
                         ghost_layer_ratio = ghost_layer_ratio, verbose = verbose)
                     projs = permutedims(projs)
 
@@ -1370,6 +1379,7 @@ module ImmersedBoundary
             cmsh = BlockMesher.coarsen(msh, factor; 
                 verbose = verbose)
             cdom = Domain(cmsh; 
+                approximate_bcs = true,
                 verbose = verbose, dom.reconstruction_kwargs...)
 
             X = Matrix{Tf}(undef, length(cdom), ndims(cdom)); X .= 0
