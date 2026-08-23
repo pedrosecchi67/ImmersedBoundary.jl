@@ -1273,11 +1273,16 @@ module BlockMesher
             sizes = maximum(msh.block_widths; dims = 1) .* factor |> vec
             bsize = 1
 
-            return Mesh(
+            cmsh = Mesh(
                 msh.origin, msh.widths;
                 block_size = bsize, verbose = verbose,
                 refinement_regions = AMR_fields(centers, sizes)
             )
+            for (k, v) in msh.distance_fields
+                cmsh.distance_fields[k] = v
+            end
+
+            return cmsh
         end
 
         # coarsen via block size reduction
@@ -1285,7 +1290,7 @@ module BlockMesher
             msh.origin, msh.widths, 
             bsize,
             msh.block_origins, msh.block_widths,
-            Dict{String, DistanceField}(), # msh.distance_fields
+            msh.distance_fields
         )
     end
 
