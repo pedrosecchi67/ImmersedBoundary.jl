@@ -1285,7 +1285,7 @@ module BlockMesher
             msh.origin, msh.widths, 
             bsize,
             msh.block_origins, msh.block_widths,
-            msh.distance_fields
+            Dict{String, DistanceField}(), # msh.distance_fields
         )
     end
 
