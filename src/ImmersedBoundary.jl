@@ -1395,7 +1395,7 @@ module ImmersedBoundary
         tree_old = nothing; Xold = nothing;
         Base.GC.gc()
 
-        (coarse_doms, prolongators, coarseners)
+        (coarse_doms, coarseners, prolongators)
     end
 
     export volume_integral
