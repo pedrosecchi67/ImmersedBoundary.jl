@@ -1273,6 +1273,7 @@ module BlockMesher
             sizes = maximum(msh.block_widths; dims = 1) .* factor |> vec
             bsize = 1
 
+            # coarser grids don't include distance fields
             return Mesh(
                 msh.origin, msh.widths;
                 block_size = bsize, verbose = verbose,
@@ -1285,7 +1286,7 @@ module BlockMesher
             msh.origin, msh.widths, 
             bsize,
             msh.block_origins, msh.block_widths,
-            Dict{String, DistanceField}(), # msh.distance_fields
+            msh.distance_fields
         )
     end
 
