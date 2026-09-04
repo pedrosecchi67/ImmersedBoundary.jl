@@ -177,12 +177,12 @@ module Turbulence
         Cμ::Real = 0.09f0, σk::Real = 1.0f0, σϵ::Real = 1.3f0,
         C1ϵ::Real = 1.44f0, C2ϵ::Real = 1.92f0,
     )
-        νₜ = @. Cμ * k ^ 2 / ϵ
+        νₜ = @. Cμ * k ^ 2 / max(ϵ, 1f-14)
 
         Pk = @. νₜ * S ^ 2
 
         Sk = @. Pk - ϵ
-        Sϵ = @. C1ϵ * Pk * ϵ / k - C2ϵ * ϵ ^ 2 / k
+        Sϵ = @. (C1ϵ * Pk * ϵ - C2ϵ * ϵ ^ 2) / max(k, 1f-14)
 
         (
             νk = νₜ ./ σk,
