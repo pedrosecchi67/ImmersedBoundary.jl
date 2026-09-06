@@ -708,7 +708,7 @@ module CFD
                 F[:, 2 + j] .+= τ(dim, j)
             end
         else # direction as matrix
-            τdim = typeof(T)[]
+            τdim = typeof(μ)[]
             for i = 1:nd
                 s = similar(T)
                 s .= 0
